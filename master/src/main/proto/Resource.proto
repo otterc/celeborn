@@ -103,6 +103,7 @@ message WorkerLostRequest {
   required int32 pushPort = 3;
   required int32 fetchPort = 4 ;
   required int32 replicatePort = 5;
+  required int32 internalRpcPort = 6;
 }
 
 message WorkerRemoveRequest {
@@ -111,6 +112,7 @@ message WorkerRemoveRequest {
   required int32 pushPort = 3;
   required int32 fetchPort = 4 ;
   required int32 replicatePort = 5;
+  required int32 internalRpcPort = 6;
 }
 
 message WorkerHeartbeatRequest {
@@ -124,6 +126,7 @@ message WorkerHeartbeatRequest {
   map<string, ResourceConsumption> userResourceConsumption = 8;
   map<string, int64> estimatedAppDiskUsage = 9;
   required bool highWorkload = 10;
+  required int32 internalRpcPort = 11;
 }
 
 message RegisterWorkerRequest {
@@ -134,6 +137,7 @@ message RegisterWorkerRequest {
   required int32 replicatePort = 5;
   map<string, DiskInfo> disks = 6;
   map<string, ResourceConsumption> userResourceConsumption = 7;
+  required int32 internalRpcPort = 8;
 }
 
 message ReportWorkerUnavailableRequest {
@@ -150,6 +154,7 @@ message WorkerAddress {
   required int32 pushPort = 3;
   required int32 fetchPort = 4;
   required int32 replicatePort = 5;
+  required int32 internalRpcPort = 6;
 }
 
 message UserIdentifier {

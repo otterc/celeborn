@@ -24,12 +24,17 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import scala.Option;
 import scala.reflect.ClassTag$;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.handler.ssl.SslContext;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,9 +48,12 @@ import org.apache.celeborn.common.network.TransportContext;
 import org.apache.celeborn.common.network.buffer.NettyManagedBuffer;
 import org.apache.celeborn.common.network.client.RpcResponseCallback;
 import org.apache.celeborn.common.network.client.TransportClient;
+import org.apache.celeborn.common.network.client.TransportClientBootstrap;
 import org.apache.celeborn.common.network.client.TransportClientFactory;
 import org.apache.celeborn.common.network.protocol.PushData;
 import org.apache.celeborn.common.network.protocol.PushMergedData;
+import org.apache.celeborn.common.network.sasl.SaslClientBootstrap;
+import org.apache.celeborn.common.network.sasl.SaslCredentials;
 import org.apache.celeborn.common.network.server.BaseMessageHandler;
 import org.apache.celeborn.common.network.util.TransportConf;
 import org.apache.celeborn.common.protocol.*;
@@ -153,6 +161,9 @@ public class ShuffleClientImpl extends ShuffleClient {
   protected final Map<Integer, ReduceFileGroups> reduceFileGroupsMap =
       JavaUtils.newConcurrentHashMap();
 
+  private final AtomicReference<PbApplicationMetaInfo> appMetaInfo = new AtomicReference<>();
+  private final TransportConf dataTransportConf;
+
   public ShuffleClientImpl(String appUniqueId, CelebornConf conf, UserIdentifier userIdentifier) {
     super();
     this.appUniqueId = appUniqueId;
@@ -172,15 +183,11 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
 
     // init rpc env and master endpointRef
-    rpcEnv = RpcEnv.create("ShuffleClient", Utils.localHostName(conf), 0, conf);
+    rpcEnv = RpcEnv.create("ShuffleClient", Utils.localHostName(conf), 0, conf, Option.apply(null));
 
     String module = TransportModuleConstants.DATA_MODULE;
-    TransportConf dataTransportConf =
+    dataTransportConf =
         Utils.fromCelebornConf(conf, module, conf.getInt("celeborn." + module + ".io.threads", 8));
-    TransportContext context =
-        new TransportContext(
-            dataTransportConf, new BaseMessageHandler(), conf.clientCloseIdleConnections());
-    dataClientFactory = context.createClientFactory();
 
     int pushDataRetryThreads = conf.clientPushRetryThreads();
     pushDataRetryPool =
@@ -193,6 +200,38 @@ public class ShuffleClientImpl extends ShuffleClient {
     reviveManager = new ReviveManager(this, conf);
 
     logger.info("Created ShuffleClientImpl, appUniqueId: {}", appUniqueId);
+  }
+
+  private void checkDataClientFactoryInit() throws IOException {
+    if (dataClientFactory != null) {
+      return;
+    }
+    if (!conf.authEnabled()) {
+      TransportContext context =
+          new TransportContext(
+              dataTransportConf, new BaseMessageHandler(), conf.clientCloseIdleConnections());
+      dataClientFactory = context.createClientFactory();
+    } else {
+      Preconditions.checkNotNull(appMetaInfo.get(), "Application meta info is missing");
+      SslContext clientSslContext =
+          conf.tlsEnabled() ? TLSUtils.buildSslContextForClient(true) : null;
+      TransportContext context =
+          new TransportContext(
+              dataTransportConf,
+              new BaseMessageHandler(),
+              conf.clientCloseIdleConnections(),
+              null,
+              false,
+              null,
+              new TransportContext.TransportSslContext(null, clientSslContext));
+      List<TransportClientBootstrap> bootstraps = Lists.newArrayList();
+      bootstraps.add(
+          new SaslClientBootstrap(
+              dataTransportConf,
+              appUniqueId,
+              new SaslCredentials(appUniqueId, appMetaInfo.get().getSecret())));
+      dataClientFactory = context.createClientFactory(bootstraps);
+    }
   }
 
   private boolean isPushTargetWorkerExcluded(
@@ -275,6 +314,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       try {
         if (!isPushTargetWorkerExcluded(newLoc, pushDataRpcResponseCallback)) {
           if (!testRetryRevive || remainReviveTimes < 1) {
+            checkDataClientFactoryInit();
             TransportClient client =
                 dataClientFactory.createClient(newLoc.getHost(), newLoc.getPushPort(), partitionId);
             NettyManagedBuffer newBuffer = new NettyManagedBuffer(Unpooled.wrappedBuffer(body));
@@ -536,6 +576,9 @@ public class ShuffleClientImpl extends ShuffleClient {
               pushExcludedWorkers.remove(partitionLoc.getPeer().hostAndPushPort());
             }
             result.put(partitionLoc.getId(), partitionLoc);
+            if (appMetaInfo.compareAndSet(null, response.getApplicationMetaInfo())) {
+              logger.info("Retrieved application meta info for {}.", appUniqueId);
+            }
           }
           return result;
         } else if (StatusCode.SLOT_NOT_AVAILABLE.equals(respStatus)) {
@@ -1070,6 +1113,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       try {
         if (!isPushTargetWorkerExcluded(loc, wrappedCallback)) {
           if (!testRetryRevive) {
+            checkDataClientFactoryInit();
             TransportClient client =
                 dataClientFactory.createClient(loc.getHost(), loc.getPushPort(), partitionId);
             client.pushData(pushData, pushDataTimeout, wrappedCallback);
@@ -1446,6 +1490,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     try {
       if (!isPushTargetWorkerExcluded(batches.get(0).loc, wrappedCallback)) {
         if (!testRetryRevive || remainReviveTimes < 1) {
+          checkDataClientFactoryInit();
           TransportClient client = dataClientFactory.createClient(host, port);
           client.pushMergedData(mergedData, pushDataTimeout, wrappedCallback);
         } else {
@@ -1550,6 +1595,9 @@ public class ShuffleClientImpl extends ShuffleClient {
               shuffleId,
               TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - getReducerFileGroupStartTime),
               response.fileGroup().size());
+          if (appMetaInfo.compareAndSet(null, response.applicationMetaInfo().get())) {
+            logger.info("Retrieved the application meta info for {}.", appUniqueId);
+          }
           return new ReduceFileGroups(
               response.fileGroup(), response.attempts(), response.partitionIds());
         } else if (response.status() == StatusCode.STAGE_END_TIME_OUT) {
@@ -1599,6 +1647,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       return CelebornInputStream.empty();
     } else {
       String shuffleKey = Utils.makeShuffleKey(appUniqueId, shuffleId);
+      checkDataClientFactoryInit();
       return CelebornInputStream.create(
           conf,
           dataClientFactory,

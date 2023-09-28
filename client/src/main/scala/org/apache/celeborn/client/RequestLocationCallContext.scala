@@ -21,6 +21,7 @@ import java.util
 import java.util.concurrent.ConcurrentHashMap
 
 import org.apache.celeborn.common.internal.Logging
+import org.apache.celeborn.common.network.client.RegistrationInfo
 import org.apache.celeborn.common.protocol.PartitionLocation
 import org.apache.celeborn.common.protocol.message.ControlMessages.{ChangeLocationResponse, RegisterShuffleResponse}
 import org.apache.celeborn.common.protocol.message.StatusCode
@@ -71,8 +72,14 @@ case class ApplyNewLocationCallContext(context: RpcCallContext) extends RequestL
       available: Boolean): Unit = {
     partitionLocationOpt match {
       case Some(partitionLocation) =>
-        context.reply(RegisterShuffleResponse(status, Array(partitionLocation)))
-      case None => context.reply(RegisterShuffleResponse(status, Array.empty))
+        context.reply(RegisterShuffleResponse(
+          status,
+          Array(partitionLocation),
+          Some(RegistrationInfo.getInstance().getApplicationMetaInfo)))
+      case None => context.reply(RegisterShuffleResponse(
+          status,
+          Array.empty,
+          Some(RegistrationInfo.getInstance().getApplicationMetaInfo)))
     }
   }
 }

@@ -30,6 +30,7 @@ import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo}
 import org.apache.celeborn.common.network.protocol.TransportMessage
 import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.MessageType._
+import org.apache.celeborn.common.protocol.message.ControlMessages.ApplicationMetaInfo
 import org.apache.celeborn.common.quota.ResourceConsumption
 import org.apache.celeborn.common.util.{PbSerDeUtils, Utils}
 
@@ -86,6 +87,7 @@ object ControlMessages extends Logging {
         pushPort: Int,
         fetchPort: Int,
         replicatePort: Int,
+        internalRpcPort: Int,
         disks: Map[String, DiskInfo],
         userResourceConsumption: Map[UserIdentifier, ResourceConsumption],
         requestId: String): PbRegisterWorker = {
@@ -95,6 +97,7 @@ object ControlMessages extends Logging {
       PbRegisterWorker.newBuilder()
         .setHost(host)
         .setRpcPort(rpcPort)
+        .setInternalRpcPort(internalRpcPort)
         .setPushPort(pushPort)
         .setFetchPort(fetchPort)
         .setReplicatePort(replicatePort)
@@ -105,12 +108,19 @@ object ControlMessages extends Logging {
     }
   }
 
+  case class ApplicationMetaInfoRequest(
+      appId: String,
+      override var requestId: String) extends MasterRequestMessage
+
+  case class ApplicationMetaInfo(appId: String, secret: String) extends MasterMessage
+
   case class HeartbeatFromWorker(
       host: String,
       rpcPort: Int,
       pushPort: Int,
       fetchPort: Int,
       replicatePort: Int,
+      internalRpcPort: Int,
       disks: Seq[DiskInfo],
       userResourceConsumption: util.Map[UserIdentifier, ResourceConsumption],
       activeShuffleKeys: util.Set[String],
@@ -153,12 +163,17 @@ object ControlMessages extends Logging {
   object RegisterShuffleResponse {
     def apply(
         status: StatusCode,
-        partitionLocations: Array[PartitionLocation]): PbRegisterShuffleResponse =
-      PbRegisterShuffleResponse.newBuilder()
+        partitionLocations: Array[PartitionLocation],
+        applicationMetaInfo: Option[PbApplicationMetaInfo] = None): PbRegisterShuffleResponse = {
+      val builder = PbRegisterShuffleResponse.newBuilder()
         .setStatus(status.getValue)
         .addAllPartitionLocations(
           partitionLocations.map(PbSerDeUtils.toPbPartitionLocation).toSeq.asJava)
-        .build()
+      if (applicationMetaInfo.isDefined) {
+        builder.setApplicationMetaInfo(applicationMetaInfo.get)
+      }
+      builder.build()
+    }
   }
 
   case class RequestSlots(
@@ -270,7 +285,8 @@ object ControlMessages extends Logging {
       status: StatusCode,
       fileGroup: util.Map[Integer, util.Set[PartitionLocation]],
       attempts: Array[Int],
-      partitionIds: util.Set[Integer] = new util.HashSet[Integer]())
+      partitionIds: util.Set[Integer] = new util.HashSet[Integer](),
+      applicationMetaInfo: Option[PbApplicationMetaInfo] = None)
     extends MasterMessage
 
   object WorkerLost {
@@ -280,9 +296,11 @@ object ControlMessages extends Logging {
         pushPort: Int,
         fetchPort: Int,
         replicatePort: Int,
+        internalRpcPort: Int,
         requestId: String): PbWorkerLost = PbWorkerLost.newBuilder()
       .setHost(host)
       .setRpcPort(rpcPort)
+      .setInternalRpcPort(internalRpcPort)
       .setPushPort(pushPort)
       .setFetchPort(fetchPort)
       .setReplicatePort(replicatePort)
@@ -470,6 +488,7 @@ object ControlMessages extends Logging {
           pushPort,
           fetchPort,
           replicatePort,
+          internalRpcPort,
           disks,
           userResourceConsumption,
           activeShuffleKeys,
@@ -482,6 +501,7 @@ object ControlMessages extends Logging {
       val payload = PbHeartbeatFromWorker.newBuilder()
         .setHost(host)
         .setRpcPort(rpcPort)
+        .setInternalRpcPort(internalRpcPort)
         .setPushPort(pushPort)
         .setFetchPort(fetchPort)
         .addAllDisks(pbDisks)
@@ -588,7 +608,12 @@ object ControlMessages extends Logging {
         .build().toByteArray
       new TransportMessage(MessageType.GET_REDUCER_FILE_GROUP, payload)
 
-    case GetReducerFileGroupResponse(status, fileGroup, attempts, partitionIds) =>
+    case GetReducerFileGroupResponse(
+          status,
+          fileGroup,
+          attempts,
+          partitionIds,
+          applicationMetaInfo) =>
       val builder = PbGetReducerFileGroupResponse
         .newBuilder()
         .setStatus(status.getValue)
@@ -601,6 +626,9 @@ object ControlMessages extends Logging {
         }.asJava)
       builder.addAllAttempts(attempts.map(Integer.valueOf).toIterable.asJava)
       builder.addAllPartitionIds(partitionIds)
+      if (applicationMetaInfo.isDefined) {
+        builder.setApplicationMetaInfo(applicationMetaInfo.get)
+      }
       val payload = builder.build().toByteArray
       new TransportMessage(MessageType.GET_REDUCER_FILE_GROUP_RESPONSE, payload)
 
@@ -804,6 +832,35 @@ object ControlMessages extends Logging {
 
     case pb: PbCheckWorkersAvailableResponse =>
       new TransportMessage(MessageType.CHECK_WORKERS_AVAILABLE_RESPONSE, pb.toByteArray)
+
+    case pb: PbAuthenticationInitiationRequest =>
+      new TransportMessage(MessageType.AUTHENTICATION_INITIATION_REQUEST, pb.toByteArray)
+
+    case pb: PbAuthenticationInitiationResponse =>
+      new TransportMessage(MessageType.AUTHENTICATION_INITIATION_RESPONSE, pb.toByteArray)
+
+    case pb: PbSaslMessage =>
+      new TransportMessage(MessageType.SASL_MESSAGE, pb.toByteArray)
+
+    case pb: PbRegisterApplicationRequest =>
+      new TransportMessage(MessageType.REGISTER_APPLICATION_REQUEST, pb.toByteArray)
+
+    case pb: PbRegisterApplicationResponse =>
+      new TransportMessage(MessageType.REGISTER_APPLICATION_RESPONSE, pb.toByteArray)
+
+    case ApplicationMetaInfo(appId, secret) =>
+      val pb = PbApplicationMetaInfo.newBuilder()
+        .setAppId(appId)
+        .setSecret(secret)
+        .build()
+      new TransportMessage(MessageType.APPLICATION_META_INFO, pb.toByteArray)
+
+    case ApplicationMetaInfoRequest(appId, requestId) =>
+      val pb = PbApplicationMetaInfoRequest.newBuilder()
+        .setAppId(appId)
+        .setRequestId(requestId)
+        .build()
+      new TransportMessage(MessageType.APPLICATION_META_INFO_REQUEST, pb.toByteArray)
   }
 
   // TODO change return type to GeneratedMessageV3
@@ -859,6 +916,7 @@ object ControlMessages extends Logging {
           pbHeartbeatFromWorker.getPushPort,
           pbHeartbeatFromWorker.getFetchPort,
           pbHeartbeatFromWorker.getReplicatePort,
+          pbHeartbeatFromWorker.getInternalRpcPort,
           pbDisks,
           userResourceConsumption,
           activeShuffleKeys,
@@ -946,7 +1004,8 @@ object ControlMessages extends Logging {
           Utils.toStatusCode(pbGetReducerFileGroupResponse.getStatus),
           fileGroup,
           attempts,
-          partitionIds)
+          partitionIds,
+          Some(pbGetReducerFileGroupResponse.getApplicationMetaInfo))
 
       case UNREGISTER_SHUFFLE_VALUE =>
         PbUnregisterShuffle.parseFrom(message.getPayload)
@@ -1119,6 +1178,29 @@ object ControlMessages extends Logging {
 
       case CHECK_WORKERS_AVAILABLE_RESPONSE_VALUE =>
         PbCheckWorkersAvailableResponse.parseFrom(message.getPayload)
+
+      case AUTHENTICATION_INITIATION_REQUEST_VALUE =>
+        PbAuthenticationInitiationRequest.parseFrom(message.getPayload)
+
+      case AUTHENTICATION_INITIATION_RESPONSE_VALUE =>
+        PbAuthenticationInitiationResponse.parseFrom(message.getPayload)
+
+      case SASL_MESSAGE_VALUE =>
+        PbSaslMessage.parseFrom(message.getPayload)
+
+      case REGISTER_APPLICATION_REQUEST_VALUE =>
+        PbRegisterApplicationRequest.parseFrom(message.getPayload)
+
+      case REGISTER_APPLICATION_RESPONSE_VALUE =>
+        PbRegisterApplicationResponse.parseFrom(message.getPayload)
+
+      case APPLICATION_META_INFO_VALUE =>
+        val pb = PbApplicationMetaInfo.parseFrom(message.getPayload)
+        ApplicationMetaInfo(pb.getAppId, pb.getSecret)
+
+      case APPLICATION_META_INFO_REQUEST_VALUE =>
+        val pb = PbApplicationMetaInfoRequest.parseFrom(message.getPayload)
+        ApplicationMetaInfoRequest(pb.getAppId, pb.getRequestId)
     }
   }
 }

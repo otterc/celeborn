@@ -34,7 +34,7 @@ import org.apache.celeborn.common.CelebornConf.MAX_CHUNKS_BEING_TRANSFERRED
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{FileInfo, FileManagedBuffers}
 import org.apache.celeborn.common.network.buffer.NioManagedBuffer
-import org.apache.celeborn.common.network.client.TransportClient
+import org.apache.celeborn.common.network.client.{RpcResponseCallback, TransportClient}
 import org.apache.celeborn.common.network.protocol._
 import org.apache.celeborn.common.network.protocol.Message.Type
 import org.apache.celeborn.common.network.server.BaseMessageHandler
@@ -86,6 +86,13 @@ class FetchHandler(val conf: CelebornConf, val transportConf: TransportConf)
       throw new FileNotFoundException(errMsg)
     }
     fileInfo
+  }
+
+  override def receive(
+      client: TransportClient,
+      msg: RequestMessage,
+      callback: RpcResponseCallback): Unit = {
+    receive(client, msg)
   }
 
   override def receive(client: TransportClient, msg: RequestMessage): Unit = {
@@ -176,7 +183,7 @@ class FetchHandler(val conf: CelebornConf, val transportConf: TransportConf)
               }
             }
         } finally {
-          r.body().release()
+          // TODO: make this better. For RPC requests, buffers are released in the TransportRequestHandler.
           if (streamShuffleKey != null) {
             workerSource.stopTimer(WorkerSource.OPEN_STREAM_TIME, streamShuffleKey)
           }

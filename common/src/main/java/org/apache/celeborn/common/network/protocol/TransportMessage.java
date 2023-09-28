@@ -19,6 +19,7 @@ package org.apache.celeborn.common.network.protocol;
 
 import static org.apache.celeborn.common.protocol.MessageType.BACKLOG_ANNOUNCEMENT_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.BUFFER_STREAM_END_VALUE;
+import static org.apache.celeborn.common.protocol.MessageType.*;
 import static org.apache.celeborn.common.protocol.MessageType.OPEN_STREAM_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.PUSH_DATA_HAND_SHAKE_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.READ_ADD_CREDIT_VALUE;
@@ -38,7 +39,14 @@ import org.apache.celeborn.common.exception.CelebornIOException;
 import org.apache.celeborn.common.protocol.MessageType;
 import org.apache.celeborn.common.protocol.PbBacklogAnnouncement;
 import org.apache.celeborn.common.protocol.PbBufferStreamEnd;
+import org.apache.celeborn.common.protocol.PbApplicationMetaInfo;
+import org.apache.celeborn.common.protocol.PbApplicationMetaInfoRequest;
+import org.apache.celeborn.common.protocol.PbAuthenticationInitiationRequest;
+import org.apache.celeborn.common.protocol.PbAuthenticationInitiationResponse;
 import org.apache.celeborn.common.protocol.PbOpenStream;
+import org.apache.celeborn.common.protocol.PbRegisterApplicationRequest;
+import org.apache.celeborn.common.protocol.PbRegisterApplicationResponse;
+import org.apache.celeborn.common.protocol.PbSaslMessage;
 import org.apache.celeborn.common.protocol.PbPushDataHandShake;
 import org.apache.celeborn.common.protocol.PbReadAddCredit;
 import org.apache.celeborn.common.protocol.PbRegionFinish;
@@ -72,6 +80,20 @@ public class TransportMessage implements Serializable {
 
   public <T extends GeneratedMessageV3> T getParsedPayload() throws InvalidProtocolBufferException {
     switch (messageTypeValue) {
+      case SASL_MESSAGE_VALUE:
+        return (T) PbSaslMessage.parseFrom(payload);
+      case AUTHENTICATION_INITIATION_REQUEST_VALUE:
+        return (T) PbAuthenticationInitiationRequest.parseFrom(payload);
+      case AUTHENTICATION_INITIATION_RESPONSE_VALUE:
+        return (T) PbAuthenticationInitiationResponse.parseFrom(payload);
+      case REGISTER_APPLICATION_REQUEST_VALUE:
+        return (T) PbRegisterApplicationRequest.parseFrom(payload);
+      case REGISTER_APPLICATION_RESPONSE_VALUE:
+        return (T) PbRegisterApplicationResponse.parseFrom(payload);
+      case APPLICATION_META_INFO_VALUE:
+        return (T) PbApplicationMetaInfo.parseFrom(payload);
+      case APPLICATION_META_INFO_REQUEST_VALUE:
+        return (T) PbApplicationMetaInfoRequest.parseFrom(payload);
       case OPEN_STREAM_VALUE:
         return (T) PbOpenStream.parseFrom(payload);
       case STREAM_HANDLER_VALUE:

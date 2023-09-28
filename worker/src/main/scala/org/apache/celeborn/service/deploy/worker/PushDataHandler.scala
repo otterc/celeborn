@@ -90,6 +90,13 @@ class PushDataHandler extends BaseMessageHandler with Logging {
     logInfo(s"diskReserveSize ${Utils.bytesToString(diskReserveSize)}")
   }
 
+  override def receive(
+      client: TransportClient,
+      msg: RequestMessage,
+      callback: RpcResponseCallback): Unit = {
+    receive(client, msg)
+  }
+
   override def receive(client: TransportClient, msg: RequestMessage): Unit =
     msg match {
       case pushData: PushData =>
@@ -259,7 +266,8 @@ class PushDataHandler extends BaseMessageHandler with Logging {
             peer.getRpcPort,
             peer.getPushPort,
             peer.getFetchPort,
-            peer.getReplicatePort)
+            peer.getReplicatePort,
+            -1)
           if (unavailablePeers.containsKey(peerWorker)) {
             pushData.body().release()
             workerSource.incCounter(WorkerSource.REPLICATE_DATA_CREATE_CONNECTION_FAIL_COUNT)
@@ -531,7 +539,8 @@ class PushDataHandler extends BaseMessageHandler with Logging {
             peer.getRpcPort,
             peer.getPushPort,
             peer.getFetchPort,
-            peer.getReplicatePort)
+            peer.getReplicatePort,
+            -1)
           if (unavailablePeers.containsKey(peerWorker)) {
             pushMergedData.body().release()
             workerSource.incCounter(WorkerSource.REPLICATE_DATA_CREATE_CONNECTION_FAIL_COUNT)
@@ -761,7 +770,10 @@ class PushDataHandler extends BaseMessageHandler with Logging {
           requestId,
           Throwables.getStackTraceAsString(e)));
     } finally {
-      message.body().release()
+      if (!message.isInstanceOf[RpcRequest]) {
+        // TODO: make this better. For RPC requests we release the reference in the TransportRequestHandler.
+        message.body().release()
+      }
     }
   }
 

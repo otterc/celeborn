@@ -22,6 +22,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 
+import scala.Option;
 import scala.reflect.ClassTag$;
 
 import io.netty.channel.ChannelFuture;
@@ -95,7 +96,9 @@ public abstract class ShuffleClientBaseSuiteJ {
         .thenAnswer(
             t ->
                 ControlMessages.RegisterShuffleResponse$.MODULE$.apply(
-                    StatusCode.SUCCESS, new PartitionLocation[] {primaryLocation}));
+                    StatusCode.SUCCESS,
+                    new PartitionLocation[] {primaryLocation},
+                    Option.apply(null)));
 
     shuffleClient.setupLifecycleManagerRef(endpointRef);
     when(clientFactory.createClient(

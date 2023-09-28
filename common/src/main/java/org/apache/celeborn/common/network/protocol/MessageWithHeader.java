@@ -36,7 +36,7 @@ import org.apache.celeborn.common.network.util.AbstractFileRegion;
  *
  * <p>The header must be a ByteBuf, while the body can be a ByteBuf or a FileRegion.
  */
-class MessageWithHeader extends AbstractFileRegion {
+public class MessageWithHeader extends AbstractFileRegion {
 
   @Nullable private final ManagedBuffer managedBuffer;
   private final ByteBuf header;

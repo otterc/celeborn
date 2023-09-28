@@ -34,12 +34,14 @@ import com.google.common.base.Throwables
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.network.TransportContext
-import org.apache.celeborn.common.network.buffer.NioManagedBuffer
+import org.apache.celeborn.common.network.TransportContext.TransportSslContext
 import org.apache.celeborn.common.network.client._
-import org.apache.celeborn.common.network.protocol.{OneWayMessage => NOneWayMessage, RequestMessage => NRequestMessage, RpcFailure => NRpcFailure, RpcRequest, RpcResponse}
+import org.apache.celeborn.common.network.protocol.{RequestMessage => NRequestMessage, RpcFailure => NRpcFailure, RpcRequest}
+import org.apache.celeborn.common.network.sasl.{SaslClientBootstrap, SaslServerBootstrap}
 import org.apache.celeborn.common.network.server._
 import org.apache.celeborn.common.protocol.{RpcNameConstants, TransportModuleConstants}
 import org.apache.celeborn.common.rpc._
+import org.apache.celeborn.common.security.SecurityContext
 import org.apache.celeborn.common.serializer.{JavaSerializer, JavaSerializerInstance, SerializationStream}
 import org.apache.celeborn.common.util.{ByteBufferInputStream, ByteBufferOutputStream, JavaUtils, ThreadUtils, Utils}
 
@@ -47,7 +49,8 @@ class NettyRpcEnv(
     val conf: CelebornConf,
     javaSerializerInstance: JavaSerializerInstance,
     host: String,
-    numUsableCores: Int) extends RpcEnv(conf) with Logging {
+    numUsableCores: Int,
+    securityContext: Option[SecurityContext] = None) extends RpcEnv(conf) with Logging {
 
   private[celeborn] val transportConf = Utils.fromCelebornConf(
     conf.clone,
@@ -58,10 +61,48 @@ class NettyRpcEnv(
 
   private var worker: RpcEndpoint = null
 
-  private val transportContext =
-    new TransportContext(transportConf, new NettyRpcHandler(dispatcher, this))
+  private val transportContext = createTransportContext()
 
-  val clientFactory = transportContext.createClientFactory()
+  private def createTransportContext(): TransportContext = {
+    securityContext match {
+      case Some(ctx) =>
+        val transportSslContext = new TransportSslContext(
+          ctx.serverSecurityContext.flatMap(_.sslContext).orNull,
+          ctx.clientSecurityContext.flatMap(_.sslContext).orNull)
+        new TransportContext(
+          transportConf,
+          new NettyRpcHandler(dispatcher, this),
+          transportSslContext)
+      case None =>
+        new TransportContext(transportConf, new NettyRpcHandler(dispatcher, this))
+    }
+  }
+
+  private def createClientBootstraps(): java.util.List[TransportClientBootstrap] = {
+    val bootstraps = new java.util.ArrayList[TransportClientBootstrap]()
+    for {
+      secContext <- securityContext
+      clientSecContext <- secContext.clientSecurityContext
+      clientSaslContext <- clientSecContext.clientSaslContext
+    } {
+      if (clientSaslContext.addRegistrationBootstrap) {
+        logInfo("Add registration client bootstrap")
+        bootstraps.add(new RegistrationClientBootstrap(
+          transportConf,
+          clientSaslContext.appId,
+          clientSaslContext.saslCredentials))
+      } else {
+        logInfo("Add sasl client bootstrap")
+        bootstraps.add(new SaslClientBootstrap(
+          transportConf,
+          clientSaslContext.appId,
+          clientSaslContext.saslCredentials))
+      }
+    }
+    bootstraps
+  }
+
+  val clientFactory = transportContext.createClientFactory(createClientBootstraps())
 
   private val timeoutScheduler =
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("netty-rpc-env-timeout")
@@ -92,8 +133,31 @@ class NettyRpcEnv(
     }
   }
 
+  private def createServerBootstraps(): java.util.List[TransportServerBootstrap] = {
+    val bootstraps = new java.util.ArrayList[TransportServerBootstrap]()
+    for {
+      secContext <- securityContext
+      serverSecContext <- secContext.serverSecurityContext
+      serverSaslContext <- serverSecContext.serverSaslContext
+    } {
+      if (serverSaslContext.addRegistrationBootstrap) {
+        logInfo("Add registration server bootstrap")
+        bootstraps.add(new RegistrationServerBootstrap(
+          transportConf,
+          serverSaslContext.secretKeyHolder))
+      } else {
+        logInfo("Add sasl server bootstrap")
+        bootstraps.add(new SaslServerBootstrap(
+          transportConf,
+          serverSaslContext.secretKeyHolder,
+          serverSaslContext.applicationMetaMissingHandler.orNull))
+      }
+    }
+    bootstraps
+  }
+
   def startServer(bindAddress: String, port: Int): Unit = {
-    server = transportContext.createServer(bindAddress, port)
+    server = transportContext.createServer(bindAddress, port, createServerBootstraps())
     dispatcher.registerRpcEndpoint(
       RpcEndpointVerifier.NAME,
       new RpcEndpointVerifier(this, dispatcher))
@@ -105,7 +169,7 @@ class NettyRpcEnv(
   }
 
   override def setupEndpoint(name: String, endpoint: RpcEndpoint): RpcEndpointRef = {
-    if (name == RpcNameConstants.WORKER_EP) {
+    if (name == RpcNameConstants.WORKER_EP || name == RpcNameConstants.WORKER_INTERNAL_EP) {
       worker = endpoint
     }
     dispatcher.registerRpcEndpoint(name, endpoint)
@@ -353,7 +417,8 @@ private[celeborn] class NettyRpcEnvFactory extends RpcEnvFactory with Logging {
         conf,
         javaSerializerInstance,
         config.advertiseAddress,
-        config.numUsableCores)
+        config.numUsableCores,
+        config.securityContext)
     val startNettyRpcEnv: Int => (NettyRpcEnv, Int) = { actualPort =>
       logInfo(s"Starting RPC Server [${config.name}] on ${config.bindAddress}:$actualPort " +
         s"with advisor endpoint ${config.advertiseAddress}:$actualPort")
@@ -537,53 +602,32 @@ private[celeborn] class NettyRpcHandler(
   override def receive(
       client: TransportClient,
       requestMessage: NRequestMessage): Unit = {
-    requestMessage match {
-      case r: RpcRequest =>
-        processRpc(client, r)
-      case r: NOneWayMessage =>
-        processOnewayMessage(client, r)
-    }
-  }
-
-  private def processRpc(client: TransportClient, r: RpcRequest): Unit = {
-    val callback = new RpcResponseCallback {
-      override def onSuccess(response: ByteBuffer): Unit = {
-        client.getChannel.writeAndFlush(new RpcResponse(
-          r.requestId,
-          new NioManagedBuffer(response)))
-      }
-
-      override def onFailure(e: Throwable): Unit = {
-        client.getChannel.writeAndFlush(new NRpcFailure(
-          r.requestId,
-          Throwables.getStackTraceAsString(e)))
-      }
-    }
     try {
-      val message = r.body().nioByteBuffer()
-      val messageToDispatch = internalReceive(client, message)
-      dispatcher.postRemoteMessage(messageToDispatch, callback)
-    } catch {
-      case e: Exception =>
-        logError("Error while invoking RpcHandler#receive() on RPC id " + r.requestId, e)
-        client.getChannel.writeAndFlush(new NRpcFailure(
-          r.requestId,
-          Throwables.getStackTraceAsString(e)))
-    } finally {
-      r.body().release()
-    }
-  }
-
-  private def processOnewayMessage(client: TransportClient, r: NOneWayMessage): Unit = {
-    try {
-      val message = r.body().nioByteBuffer()
+      val message = requestMessage.body().nioByteBuffer()
       val messageToDispatch = internalReceive(client, message)
       dispatcher.postOneWayMessage(messageToDispatch)
     } catch {
       case e: Exception =>
         logError("Error while invoking RpcHandler#receive() for one-way message.", e)
-    } finally {
-      r.body().release()
+    }
+  }
+
+  override def receive(
+      client: TransportClient,
+      requestMessage: NRequestMessage,
+      callback: RpcResponseCallback): Unit = {
+
+    try {
+      val message = requestMessage.body().nioByteBuffer()
+      val messageToDispatch = internalReceive(client, message)
+      dispatcher.postRemoteMessage(messageToDispatch, callback)
+    } catch {
+      case e: Exception =>
+        val rpcReq = requestMessage.asInstanceOf[RpcRequest]
+        logError("Error while invoking RpcHandler#receive() on RPC id " + rpcReq.requestId, e)
+        client.getChannel.writeAndFlush(new NRpcFailure(
+          rpcReq.requestId,
+          Throwables.getStackTraceAsString(e)))
     }
   }
 

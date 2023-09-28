@@ -24,13 +24,24 @@ public class RpcNameConstants {
   // Master Endpoint Name
   public static String MASTER_EP = "MasterEndpoint";
 
+  public static String MASTER_INTERNAL_SYS = "MasterInternalSys";
+
+  // Master Endpoint Name
+  public static String MASTER_INTERNAL_EP = "MasterInternalEndpoint";
+
   // For Worker
   public static String WORKER_SYS = "WorkerSys";
 
+  public static String WORKER_INTERNAL_SYS = "WorkerInternalSys";
+
   // Worker Endpoint Name
   public static String WORKER_EP = "WorkerEndpoint";
+  public static String WORKER_INTERNAL_EP = "WorkerInternalEndpoint";
 
   // For Driver(SparkShuffleManager)
   public static String LIFECYCLE_MANAGER_EP = "LifecycleManagerEndpoint";
   public static String LIFECYCLE_MANAGER_SYS = "LifecycleManagerSys";
+
+  public static String LIFECYCLE_MANAGER_MASTER_SYS = "LifecycleManagerMasterSys";
+  public static String LIFECYCLE_MANAGER_WORKER_SYS = "LifecycleManagerWorkerSys";
 }

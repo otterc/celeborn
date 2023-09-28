@@ -17,6 +17,8 @@
 
 package org.apache.celeborn.client
 
+import java.lang.{Byte => JByte}
+import java.security.SecureRandom
 import java.util
 import java.util.{function, List => JList}
 import java.util.concurrent.{ConcurrentHashMap, ScheduledFuture, TimeUnit}
@@ -26,6 +28,8 @@ import scala.collection.mutable
 import scala.util.Random
 
 import com.google.common.annotations.VisibleForTesting
+import io.netty.handler.ssl.SslContext
+import org.apache.commons.codec.binary.Hex
 
 import org.apache.celeborn.client.LifecycleManager.{ShuffleAllocatedWorkers, ShuffleFailedWorkers}
 import org.apache.celeborn.client.listener.WorkerStatusListener
@@ -34,12 +38,14 @@ import org.apache.celeborn.common.client.MasterClient
 import org.apache.celeborn.common.identity.{IdentityProvider, UserIdentifier}
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{ShufflePartitionLocationInfo, WorkerInfo}
+import org.apache.celeborn.common.network.client.RegistrationInfo
 import org.apache.celeborn.common.protocol._
-import org.apache.celeborn.common.protocol.RpcNameConstants.WORKER_EP
+import org.apache.celeborn.common.protocol.RpcNameConstants._
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc._
-import org.apache.celeborn.common.util.{JavaUtils, PbSerDeUtils, ThreadUtils, Utils}
+import org.apache.celeborn.common.security.{ClientSecurityContextBuilder, SecurityContext, SecurityContextBuilder, ServerSecurityContextBuilder}
+import org.apache.celeborn.common.util.{JavaUtils, PbSerDeUtils, ThreadUtils, TLSUtils, Utils}
 // Can Remove this if celeborn don't support scala211 in future
 import org.apache.celeborn.common.util.FunctionConverter._
 
@@ -75,7 +81,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   val latestPartitionLocation =
     JavaUtils.newConcurrentHashMap[Int, ConcurrentHashMap[Int, PartitionLocation]]()
   private val userIdentifier: UserIdentifier = IdentityProvider.instantiate(conf).provide()
-
+  RegistrationInfo.initialize(appUniqueId, createSecret())
   @VisibleForTesting
   def workerSnapshots(shuffleId: Int): util.Map[WorkerInfo, ShufflePartitionLocationInfo] =
     shuffleAllocatedWorkers.get(shuffleId)
@@ -114,12 +120,29 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     RpcNameConstants.LIFECYCLE_MANAGER_SYS,
     lifecycleHost,
     conf.shuffleManagerPort,
-    conf)
+    conf,
+    None)
   rpcEnv.setupEndpoint(RpcNameConstants.LIFECYCLE_MANAGER_EP, this)
+  logInfo(s"Authentication enabled: ${conf.authEnabled}. TLS enabled: ${conf.tlsEnabled}")
+  val clientSslContext =
+    if (conf.tlsEnabled) Some(TLSUtils.buildSslContextForClient(true)) else None
 
-  logInfo(s"Starting LifecycleManager on ${rpcEnv.address}")
+  val rpcEnvForMaster: RpcEnv =
+    RpcEnv.create(
+      LIFECYCLE_MANAGER_MASTER_SYS,
+      lifecycleHost,
+      0,
+      conf,
+      createSecurityContext(clientSslContext, addClientRegistrationBootstrap = true))
+  val rpcEnvForWorker: RpcEnv =
+    RpcEnv.create(
+      LIFECYCLE_MANAGER_WORKER_SYS,
+      lifecycleHost,
+      0,
+      conf,
+      createSecurityContext(clientSslContext, addClientRegistrationBootstrap = false))
 
-  private val masterClient = new MasterClient(rpcEnv, conf)
+  private val masterClient = new MasterClient(rpcEnvForMaster, conf, false)
   val commitManager = new CommitManager(appUniqueId, conf, this)
   val workerStatusTracker = new WorkerStatusTracker(conf, this)
   private val heartbeater =
@@ -174,6 +197,34 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       rpcEnv.shutdown()
       rpcEnv.awaitTermination()
     }
+    if (rpcEnvForMaster != null) {
+      rpcEnvForMaster.shutdown()
+      rpcEnvForMaster.awaitTermination()
+    }
+    if (rpcEnvForWorker != null) {
+      rpcEnvForWorker.shutdown()
+      rpcEnvForWorker.awaitTermination()
+    }
+  }
+
+  /**
+   * Creates security context for external RPC endpoint.
+   */
+  def createSecurityContext(
+      clientSslContext: Option[SslContext],
+      addClientRegistrationBootstrap: Boolean): Option[SecurityContext] = {
+    if (!conf.authEnabled) {
+      return Option.empty
+    }
+    logInfo("Authentication is enabled.")
+    val securityContext = new SecurityContextBuilder()
+      .withClientSecurityContext(
+        new ClientSecurityContextBuilder().withSslContext(clientSslContext)
+          .withAddRegistrationBootstrap(addClientRegistrationBootstrap)
+          .withAppId(appUniqueId)
+          .withSaslUser(appUniqueId)
+          .withSaslPassword(RegistrationInfo.getInstance().getSecret).build()).build()
+    Some(securityContext)
   }
 
   def getUserIdentifier: UserIdentifier = {
@@ -330,7 +381,10 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
                 partitionId,
                 initialLocs)
             case PartitionType.REDUCE =>
-              context.reply(RegisterShuffleResponse(StatusCode.SUCCESS, initialLocs))
+              context.reply(RegisterShuffleResponse(
+                StatusCode.SUCCESS,
+                initialLocs,
+                Some(RegistrationInfo.getInstance().getApplicationMetaInfo)))
             case _ =>
               throw new UnsupportedOperationException(s"Not support $partitionType yet")
           }
@@ -352,7 +406,10 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         partitionLocations: Array[PartitionLocation]): Unit = {
       // if any partition location resource exist just reply
       if (partitionLocations.size > 0) {
-        context.reply(RegisterShuffleResponse(StatusCode.SUCCESS, partitionLocations))
+        context.reply(RegisterShuffleResponse(
+          StatusCode.SUCCESS,
+          partitionLocations,
+          Some(RegistrationInfo.getInstance().getApplicationMetaInfo)))
       } else {
         // request new resource for this task
         changePartitionManager.handleRequestPartitionLocation(
@@ -427,7 +484,9 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     ThreadUtils.parmap(slots.asScala, "InitWorkerRef", parallelism) { case (workerInfo, _) =>
       try {
         workerInfo.endpoint =
-          rpcEnv.setupEndpointRef(RpcAddress.apply(workerInfo.host, workerInfo.rpcPort), WORKER_EP)
+          rpcEnvForWorker.setupEndpointRef(
+            RpcAddress.apply(workerInfo.host, workerInfo.rpcPort),
+            WORKER_EP)
       } catch {
         case t: Throwable =>
           logError(s"Init rpc client failed for $shuffleId on $workerInfo during reserve slots.", t)
@@ -475,7 +534,10 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       // Fifth, reply the allocated partition location to ShuffleClient.
       logInfo(s"Handle RegisterShuffle Success for $shuffleId.")
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
-      reply(RegisterShuffleResponse(StatusCode.SUCCESS, allPrimaryPartitionLocations))
+      reply(RegisterShuffleResponse(
+        StatusCode.SUCCESS,
+        allPrimaryPartitionLocations,
+        Some(RegistrationInfo.getInstance().getApplicationMetaInfo)))
     }
   }
 
@@ -714,7 +776,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
               s" ${destroyWorkerInfo.readableAddress()}, init according to partition info")
             try {
               if (workerStatusTracker.workerAvailable(destroyWorkerInfo)) {
-                destroyWorkerInfo.endpoint = rpcEnv.setupEndpointRef(
+                destroyWorkerInfo.endpoint = rpcEnvForWorker.setupEndpointRef(
                   RpcAddress.apply(destroyWorkerInfo.host, destroyWorkerInfo.rpcPort),
                   WORKER_EP)
               } else {
@@ -1125,6 +1187,14 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   // delegate workerStatusTracker to register listener
   def registerWorkerStatusListener(workerStatusListener: WorkerStatusListener): Unit = {
     workerStatusTracker.registerWorkerStatusListener(workerStatusListener)
+  }
+
+  private def createSecret(): String = {
+    val bits = 256
+    val rnd = new SecureRandom()
+    val secretBytes = new Array[Byte](bits / JByte.SIZE)
+    rnd.nextBytes(secretBytes)
+    Hex.encodeHexString(secretBytes)
   }
 
   // Initialize at the end of LifecycleManager construction.

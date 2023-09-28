@@ -403,6 +403,11 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     getTimeAsMs(key, s"${networkTimeout.duration.toMillis}ms").toInt
   }
 
+  def networkIoSaslTimoutMs(module: String): Int = {
+    val key = NETWORK_IO_SASL_TIMEOUT.key.replace("<module>", module)
+    getTimeAsMs(key, s"${networkTimeout.duration.toMillis}ms").toInt
+  }
+
   def networkIoNumConnectionsPerPeer(module: String): Int = {
     val key = NETWORK_IO_NUM_CONNECTIONS_PER_PEER.key.replace("<module>", module)
     getInt(key, NETWORK_IO_NUM_CONNECTIONS_PER_PEER.defaultValue.get)
@@ -533,6 +538,14 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
       }
     }
 
+  def masterInternalEndpoints: Array[String] =
+    get(MASTER_INTERNAL_ENDPOINTS).toArray.map { endpoint =>
+      Utils.parseHostPort(endpoint.replace("<localhost>", Utils.localHostName(this))) match {
+        case (host, 0) => s"$host:${HA_MASTER_NODE_INTERNAL_PORT.defaultValue.get}"
+        case (host, port) => s"$host:$port"
+      }
+    }
+
   def masterClientRpcAskTimeout: RpcTimeout =
     new RpcTimeout(get(MASTER_CLIENT_RPC_ASK_TIMEOUT).milli, MASTER_CLIENT_RPC_ASK_TIMEOUT.key)
 
@@ -541,6 +554,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def masterHost: String = get(MASTER_HOST).replace("<localhost>", Utils.localHostName(this))
 
   def masterPort: Int = get(MASTER_PORT)
+
+  def masterInternalPort: Int = get(MASTER_INTERNAL_PORT)
 
   def haEnabled: Boolean = get(HA_ENABLED)
 
@@ -580,6 +595,12 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     val key = HA_MASTER_NODE_PORT.key.replace("<id>", nodeId)
     val legacyKey = HA_MASTER_NODE_PORT.alternatives.head._1.replace("<id>", nodeId)
     getInt(key, getInt(legacyKey, HA_MASTER_NODE_PORT.defaultValue.get))
+  }
+
+  def haMasterNodeInternalPort(nodeId: String): Int = {
+    val key = HA_MASTER_NODE_INTERNAL_PORT.key.replace("<id>", nodeId)
+    val legacyKey = HA_MASTER_NODE_INTERNAL_PORT.alternatives.head._1.replace("<id>", nodeId)
+    getInt(key, getInt(legacyKey, HA_MASTER_NODE_INTERNAL_PORT.defaultValue.get))
   }
 
   def haMasterRatisHost(nodeId: String): String = {
@@ -625,6 +646,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   //                      Worker                         //
   // //////////////////////////////////////////////////////
   def workerRpcPort: Int = get(WORKER_RPC_PORT)
+  def workerInternalRpcPort: Int = get(WORKER_INTERNAL_RPC_PORT)
   def workerPushPort: Int = get(WORKER_PUSH_PORT)
   def workerFetchPort: Int = get(WORKER_FETCH_PORT)
   def workerReplicatePort: Int = get(WORKER_REPLICATE_PORT)
@@ -1039,6 +1061,14 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     get(CLIENT_RESULT_PARTITION_SUPPORT_FLOATING_BUFFER)
   def clientFlinkDataCompressionEnabled: Boolean = get(CLIENT_DATA_COMPRESSION_ENABLED)
   def clientShuffleMapPartitionSplitEnabled = get(CLIENT_SHUFFLE_MAPPARTITION_SPLIT_ENABLED)
+
+  // //////////////////////////////////////////////////////
+  //               Authentication                        //
+  // //////////////////////////////////////////////////////
+  def authEnabled: Boolean = get(AUTH_ENABLED)
+  def tlsEnabled: Boolean = get(AUTH_TLS_ENABLED)
+  def authServerKeyPath: String = get(AUTH_SERVER_KEYPATH.key)
+  def authServerCertPath: String = get(AUTH_SERVER_CERTPATH.key)
 }
 
 object CelebornConf extends Logging {
@@ -1364,6 +1394,13 @@ object CelebornConf extends Logging {
       .doc("Connection active timeout.")
       .fallbackConf(NETWORK_TIMEOUT)
 
+  val NETWORK_IO_SASL_TIMEOUT: ConfigEntry[Long] =
+    buildConf("celeborn.<module>.io.saslTimeout")
+      .categories("network")
+      .doc("Timeout for a single round trip of auth message exchange, in milliseconds.")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefaultString("30s")
+
   val NETWORK_IO_NUM_CONNECTIONS_PER_PEER: ConfigEntry[Int] =
     buildConf("celeborn.<module>.io.numConnectionsPerPeer")
       .categories("network")
@@ -1527,7 +1564,7 @@ object CelebornConf extends Logging {
 
   val MASTER_ENDPOINTS: ConfigEntry[Seq[String]] =
     buildConf("celeborn.master.endpoints")
-      .categories("client", "worker")
+      .categories("client")
       .doc("Endpoints of master nodes for celeborn client to connect, allowed pattern " +
         "is: `<host1>:<port1>[,<host2>:<port2>]*`, e.g. `clb1:9097,clb2:9098,clb3:9099`. " +
         "If the port is omitted, 9097 will be used.")
@@ -1538,6 +1575,20 @@ object CelebornConf extends Logging {
         endpoints => endpoints.map(_ => Try(Utils.parseHostPort(_))).forall(_.isSuccess),
         "Allowed pattern is: `<host1>:<port1>[,<host2>:<port2>]*`")
       .createWithDefaultString(s"<localhost>:9097")
+
+  val MASTER_INTERNAL_ENDPOINTS: ConfigEntry[Seq[String]] =
+    buildConf("celeborn.master.internal.endpoints")
+      .categories("worker")
+      .doc("Endpoints of master nodes for celeborn worker to connect, allowed pattern " +
+        "is: `<host1>:<port1>[,<host2>:<port2>]*`, e.g. `clb1:9097,clb2:9098,clb3:9099`. " +
+        "If the port is omitted, 9098 will be used.")
+      .version("0.4.0")
+      .stringConf
+      .toSequence
+      .checkValue(
+        endpoints => endpoints.map(_ => Try(Utils.parseHostPort(_))).forall(_.isSuccess),
+        "Allowed pattern is: `<host1>:<port1>[,<host2>:<port2>]*`")
+      .createWithDefaultString(s"<localhost>:9098")
 
   val MASTER_CLIENT_RPC_ASK_TIMEOUT: ConfigEntry[Long] =
     buildConf("celeborn.masterClient.rpc.askTimeout")
@@ -1609,6 +1660,15 @@ object CelebornConf extends Logging {
       .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
       .createWithDefault(9097)
 
+  val MASTER_INTERNAL_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.master.internal.port")
+      .categories("master")
+      .version("0.4.0")
+      .doc("The internal port on the master where both workers and other master nodes connect.")
+      .intConf
+      .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
+      .createWithDefault(9098)
+
   val HA_ENABLED: ConfigEntry[Boolean] =
     buildConf("celeborn.master.ha.enabled")
       .withAlternative("celeborn.ha.enabled")
@@ -1645,6 +1705,16 @@ object CelebornConf extends Logging {
       .intConf
       .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
       .createWithDefault(9097)
+
+  val HA_MASTER_NODE_INTERNAL_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.master.ha.node.<id>.internal.port")
+      .withAlternative("celeborn.ha.master.node.<id>.internal.port")
+      .categories("ha")
+      .doc("Port for the workers and other masters to bind to a master node <id> in HA mode.")
+      .version("0.4.0")
+      .intConf
+      .checkValue(p => p >= 1024 && p < 65535, "Invalid port")
+      .createWithDefault(9098)
 
   val HA_MASTER_NODE_RATIS_HOST: OptionalConfigEntry[String] =
     buildConf("celeborn.master.ha.node.<id>.ratis.host")
@@ -2087,6 +2157,14 @@ object CelebornConf extends Logging {
       .version("0.3.0")
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("1000ms")
+
+  val WORKER_INTERNAL_RPC_PORT: ConfigEntry[Int] =
+    buildConf("celeborn.worker.internal.rpc.port")
+      .categories("worker")
+      .doc("Server port for Worker to receive RPC request from Masters/Workers.")
+      .version("0.4.0")
+      .intConf
+      .createWithDefault(0)
 
   val WORKER_RPC_PORT: ConfigEntry[Int] =
     buildConf("celeborn.worker.rpc.port")
@@ -3896,4 +3974,35 @@ object CelebornConf extends Logging {
       .version("0.3.1")
       .booleanConf
       .createWithDefault(false)
+  val AUTH_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.auth.enabled")
+      .categories("auth")
+      .version("0.4.0")
+      .doc("Whether to enable authentication.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val AUTH_TLS_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.auth.tls.enabled")
+      .categories("auth")
+      .version("0.4.0")
+      .doc("Whether to enable TLS.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val AUTH_SERVER_KEYPATH: OptionalConfigEntry[String] =
+    buildConf("celeborn.server.auth.keypath")
+      .categories("auth", "master", "worker")
+      .doc("Path to the master/worker private key file.")
+      .version("0.4.0")
+      .stringConf
+      .createOptional
+
+  val AUTH_SERVER_CERTPATH: OptionalConfigEntry[String] =
+    buildConf("celeborn.server.auth.certpath")
+      .categories("auth", "master", "worker")
+      .doc("Path to the master/worker certificate file.")
+      .version("0.4.0")
+      .stringConf
+      .createOptional
 }

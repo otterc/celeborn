@@ -95,6 +95,7 @@ public class MetaHandler {
       int pushPort;
       int fetchPort;
       int replicatePort;
+      int internalRpcPort;
       Map<String, DiskInfo> diskInfos;
       Map<UserIdentifier, ResourceConsumption> userResourceConsumption;
       List<Map<String, Integer>> slots = new ArrayList<>();
@@ -137,8 +138,10 @@ public class MetaHandler {
           pushPort = request.getWorkerLostRequest().getPushPort();
           fetchPort = request.getWorkerLostRequest().getFetchPort();
           replicatePort = request.getWorkerLostRequest().getReplicatePort();
+          internalRpcPort = request.getWorkerLostRequest().getInternalRpcPort();
           LOG.debug("Handle worker lost for {} {}", host, pushPort);
-          metaSystem.updateWorkerLostMeta(host, rpcPort, pushPort, fetchPort, replicatePort);
+          metaSystem.updateWorkerLostMeta(
+              host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort);
           break;
 
         case WorkerRemove:
@@ -147,8 +150,10 @@ public class MetaHandler {
           pushPort = request.getWorkerRemoveRequest().getPushPort();
           fetchPort = request.getWorkerRemoveRequest().getFetchPort();
           replicatePort = request.getWorkerRemoveRequest().getReplicatePort();
+          internalRpcPort = request.getWorkerRemoveRequest().getInternalRpcPort();
           LOG.debug("Handle worker remove for {} {}", host, pushPort);
-          metaSystem.updateWorkerRemoveMeta(host, rpcPort, pushPort, fetchPort, replicatePort);
+          metaSystem.updateWorkerRemoveMeta(
+              host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort);
           break;
 
         case WorkerHeartbeat:
@@ -163,14 +168,16 @@ public class MetaHandler {
           estimatedAppDiskUsage.putAll(
               request.getWorkerHeartbeatRequest().getEstimatedAppDiskUsageMap());
           replicatePort = request.getWorkerHeartbeatRequest().getReplicatePort();
+          internalRpcPort = request.getWorkerHeartbeatRequest().getInternalRpcPort();
           boolean highWorkload = request.getWorkerHeartbeatRequest().getHighWorkload();
           LOG.debug(
-              "Handle worker heartbeat for {} {} {} {} {} {} {}",
+              "Handle worker heartbeat for {} {} {} {} {} {} {} {}",
               host,
               rpcPort,
               pushPort,
               fetchPort,
               replicatePort,
+              internalRpcPort,
               diskInfos,
               userResourceConsumption);
           time = request.getWorkerHeartbeatRequest().getTime();
@@ -180,6 +187,7 @@ public class MetaHandler {
               pushPort,
               fetchPort,
               replicatePort,
+              internalRpcPort,
               diskInfos,
               userResourceConsumption,
               estimatedAppDiskUsage,
@@ -193,17 +201,19 @@ public class MetaHandler {
           pushPort = request.getRegisterWorkerRequest().getPushPort();
           fetchPort = request.getRegisterWorkerRequest().getFetchPort();
           replicatePort = request.getRegisterWorkerRequest().getReplicatePort();
+          internalRpcPort = request.getRegisterWorkerRequest().getInternalRpcPort();
           diskInfos = MetaUtil.fromPbDiskInfos(request.getRegisterWorkerRequest().getDisksMap());
           userResourceConsumption =
               MetaUtil.fromPbUserResourceConsumption(
                   request.getRegisterWorkerRequest().getUserResourceConsumptionMap());
           LOG.debug(
-              "Handle worker register for {} {} {} {} {} {} {}",
+              "Handle worker register for {} {} {} {} {} {} {} {}",
               host,
               rpcPort,
               pushPort,
               fetchPort,
               replicatePort,
+              internalRpcPort,
               diskInfos,
               userResourceConsumption);
           metaSystem.updateRegisterWorkerMeta(
@@ -212,6 +222,7 @@ public class MetaHandler {
               pushPort,
               fetchPort,
               replicatePort,
+              internalRpcPort,
               diskInfos,
               userResourceConsumption);
           break;

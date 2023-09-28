@@ -19,6 +19,7 @@ package org.apache.celeborn.service.deploy.worker
 
 import java.io.File
 import java.lang.{Long => JLong}
+import java.nio.file.Paths
 import java.util.{HashMap => JHashMap, HashSet => JHashSet, Map => JMap}
 import java.util.concurrent._
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray}
@@ -38,11 +39,15 @@ import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo, WorkerPartitionLoc
 import org.apache.celeborn.common.metrics.MetricsSystem
 import org.apache.celeborn.common.metrics.source.{JVMCPUSource, JVMSource, SystemMiscSource}
 import org.apache.celeborn.common.network.TransportContext
-import org.apache.celeborn.common.protocol.{PartitionType, PbRegisterWorkerResponse, PbWorkerLostResponse, RpcNameConstants, TransportModuleConstants}
+import org.apache.celeborn.common.network.sasl.{SaslServerBootstrap, SecretRegistry}
+import org.apache.celeborn.common.network.server.TransportServerBootstrap
+import org.apache.celeborn.common.network.util.TransportConf
+import org.apache.celeborn.common.protocol.{PartitionType, PbApplicationMetaInfo, PbApplicationMetaInfoRequest, PbRegisterWorkerResponse, PbWorkerLostResponse, RpcNameConstants, TransportModuleConstants}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.quota.ResourceConsumption
 import org.apache.celeborn.common.rpc._
-import org.apache.celeborn.common.util.{CelebornExitKind, JavaUtils, ShutdownHookManager, ThreadUtils, Utils}
+import org.apache.celeborn.common.security.{ClientSecurityContextBuilder, SecurityContext, SecurityContextBuilder, ServerSecurityContextBuilder}
+import org.apache.celeborn.common.util.{CelebornExitKind, JavaUtils, ShutdownHookManager, ThreadUtils, TLSUtils, Utils}
 // Can Remove this if celeborn don't support scala211 in future
 import org.apache.celeborn.common.util.FunctionConverter._
 import org.apache.celeborn.server.common.{HttpService, Service}
@@ -64,16 +69,31 @@ private[celeborn] class Worker(
   override val metricsSystem: MetricsSystem =
     MetricsSystem.createMetricsSystem(serviceName, conf, MetricsSystem.SERVLET_PATH)
 
+  logInfo(s"Authentication enabled: ${conf.authEnabled}. TLS enabled: ${conf.tlsEnabled}")
+  private val workerApplicationMetaMissingHandler = new WorkerApplicationMetaMissingHandler()
+  val (externalSecurityContext, internalSecurityContext) = createSecurityContexts()
+
   val rpcEnv: RpcEnv = RpcEnv.create(
     RpcNameConstants.WORKER_SYS,
     workerArgs.host,
     workerArgs.host,
     workerArgs.port,
     conf,
-    Math.min(64, Math.max(4, Runtime.getRuntime.availableProcessors())))
+    Math.min(64, Math.max(4, Runtime.getRuntime.availableProcessors())),
+    externalSecurityContext)
+
+  val internalRpcEnv: RpcEnv = RpcEnv.create(
+    RpcNameConstants.WORKER_INTERNAL_SYS,
+    workerArgs.host,
+    workerArgs.host,
+    workerArgs.internalPort,
+    conf,
+    Math.min(64, Math.max(4, Runtime.getRuntime.availableProcessors())),
+    internalSecurityContext)
 
   private val host = rpcEnv.address.host
   private val rpcPort = rpcEnv.address.port
+  private val internalRpcPort = internalRpcEnv.address.port
   Utils.checkHost(host)
 
   private val WORKER_SHUTDOWN_PRIORITY = 100
@@ -133,6 +153,9 @@ private[celeborn] class Worker(
 
   var controller = new Controller(rpcEnv, conf, metricsSystem)
   rpcEnv.setupEndpoint(RpcNameConstants.WORKER_EP, controller)
+  internalRpcEnv.setupEndpoint(
+    RpcNameConstants.WORKER_INTERNAL_EP,
+    new InternalController(internalRpcEnv, conf, metricsSystem))
 
   val pushDataHandler = new PushDataHandler()
   val (pushServer, pushClientFactory) = {
@@ -148,9 +171,10 @@ private[celeborn] class Worker(
         closeIdleConnections,
         pushServerLimiter,
         conf.workerPushHeartbeatEnabled,
-        workerSource)
+        workerSource,
+        null)
     (
-      transportContext.createServer(conf.workerPushPort),
+      transportContext.createServer(conf.workerPushPort, getServerBootstraps(transportConf)),
       transportContext.createClientFactory())
   }
 
@@ -169,8 +193,9 @@ private[celeborn] class Worker(
         closeIdleConnections,
         replicateLimiter,
         false,
-        workerSource)
-    transportContext.createServer(conf.workerReplicatePort)
+        workerSource,
+        null)
+    transportContext.createServer(conf.workerReplicatePort, java.util.Collections.emptyList())
   }
 
   var fetchHandler: FetchHandler = _
@@ -186,8 +211,9 @@ private[celeborn] class Worker(
         fetchHandler,
         closeIdleConnections,
         conf.workerFetchHeartbeatEnabled,
-        workerSource)
-    transportContext.createServer(conf.workerFetchPort)
+        workerSource,
+        null)
+    transportContext.createServer(conf.workerFetchPort, getServerBootstraps(transportConf))
   }
 
   private val pushPort = pushServer.getPort
@@ -219,6 +245,7 @@ private[celeborn] class Worker(
       pushPort,
       fetchPort,
       replicatePort,
+      internalRpcPort,
       diskInfos,
       userResourceConsumption)
 
@@ -235,8 +262,8 @@ private[celeborn] class Worker(
   val shuffleCommitInfos: ConcurrentHashMap[String, ConcurrentHashMap[Long, CommitInfo]] =
     JavaUtils.newConcurrentHashMap[String, ConcurrentHashMap[Long, CommitInfo]]()
 
-  private val masterClient = new MasterClient(rpcEnv, conf)
-
+  private val masterClient = new MasterClient(internalRpcEnv, conf, true)
+  workerApplicationMetaMissingHandler.init(masterClient)
   // (workerInfo -> last connect timeout timestamp)
   val unavailablePeers: ConcurrentHashMap[WorkerInfo, Long] =
     JavaUtils.newConcurrentHashMap[WorkerInfo, Long]()
@@ -318,6 +345,39 @@ private[celeborn] class Worker(
     }
   }
 
+  /**
+   * Creates security context for external RPC endpoint.
+   */
+  def createSecurityContexts(): (Option[SecurityContext], Option[SecurityContext]) = {
+    if (!conf.authEnabled) {
+      return (Option.empty, Option.empty)
+    }
+    val (serverSslContext, clientSslContext) =
+      if (conf.tlsEnabled) {
+        (
+          Some(TLSUtils.buildSslContextForServer(
+            Paths.get(conf.authServerCertPath),
+            Paths.get(conf.authServerKeyPath))),
+          Some(TLSUtils.buildSslContextForClient(false)))
+      } else {
+        (None, None)
+      }
+    assert(workerApplicationMetaMissingHandler != null)
+    val externalSecurityCtx = new SecurityContextBuilder()
+      .withClientSecurityContext(
+        new ClientSecurityContextBuilder().withSslContext(clientSslContext).build())
+      .withServerSecurityContext(new ServerSecurityContextBuilder().withSslContext(serverSslContext)
+        .withSecretKeyHolder(SecretRegistry.getInstance())
+        .withAppMetaMissingHandler(workerApplicationMetaMissingHandler).build()).build()
+
+    val internalSecurityContext = new SecurityContextBuilder()
+      .withClientSecurityContext(
+        new ClientSecurityContextBuilder().withSslContext(clientSslContext).build())
+      .withServerSecurityContext(new ServerSecurityContextBuilder().withSslContext(
+        serverSslContext).build()).build()
+    (Some(externalSecurityCtx), Some(internalSecurityContext))
+  }
+
   private def heartbeatToMaster(): Unit = {
     val activeShuffleKeys = new JHashSet[String]()
     val estimatedAppDiskUsage = new JHashMap[String, JLong]()
@@ -341,6 +401,7 @@ private[celeborn] class Worker(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         diskInfos,
         resourceConsumption,
         activeShuffleKeys,
@@ -415,6 +476,7 @@ private[celeborn] class Worker(
 
     logInfo("Worker started.")
     rpcEnv.awaitTermination()
+    internalRpcEnv.awaitTermination()
   }
 
   override def stop(exitKind: Int): Unit = {
@@ -478,6 +540,7 @@ private[celeborn] class Worker(
               pushPort,
               fetchPort,
               replicatePort,
+              internalRpcPort,
               // Use WorkerInfo's diskInfo since re-register when heartbeat return not-registered,
               // StorageManager have update the disk info.
               workerInfo.diskInfos.asScala.toMap,
@@ -687,6 +750,7 @@ private[celeborn] class Worker(
           pushPort,
           fetchPort,
           replicatePort,
+          internalRpcPort,
           MasterClient.genRequestId()),
         classOf[PbWorkerLostResponse])
     } catch {
@@ -720,6 +784,19 @@ private[celeborn] class Worker(
 
   @VisibleForTesting
   def getPushFetchServerPort: (Int, Int) = (pushPort, fetchPort)
+
+  def getServerBootstraps(transportConf: TransportConf)
+      : java.util.List[TransportServerBootstrap] = {
+    val serverBootstraps = new java.util.ArrayList[TransportServerBootstrap]()
+    if (conf.authEnabled) {
+      assert(workerApplicationMetaMissingHandler != null)
+      serverBootstraps.add(new SaslServerBootstrap(
+        transportConf,
+        SecretRegistry.getInstance(),
+        workerApplicationMetaMissingHandler))
+    }
+    serverBootstraps
+  }
 }
 
 private[deploy] object Worker extends Logging {

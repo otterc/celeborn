@@ -19,18 +19,15 @@ package org.apache.celeborn.service.deploy.master
 
 import java.io.IOException
 import java.net.BindException
+import java.nio.file.Paths
 import java.util
 import java.util.Collections
 import java.util.concurrent.{ConcurrentHashMap, ScheduledFuture, TimeUnit}
-
 import scala.collection.JavaConverters._
-import scala.collection.mutable
 import scala.util.Random
-
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.ratis.proto.RaftProtos
 import org.apache.ratis.proto.RaftProtos.RaftPeerRole
-
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.client.MasterClient
 import org.apache.celeborn.common.identity.UserIdentifier
@@ -38,12 +35,15 @@ import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo}
 import org.apache.celeborn.common.metrics.MetricsSystem
 import org.apache.celeborn.common.metrics.source.{JVMCPUSource, JVMSource, ResourceConsumptionSource, SystemMiscSource}
+import org.apache.celeborn.common.network.sasl.SecretRegistry
 import org.apache.celeborn.common.protocol._
-import org.apache.celeborn.common.protocol.message.{ControlMessages, StatusCode}
+import org.apache.celeborn.common.protocol.RpcNameConstants.WORKER_INTERNAL_EP
 import org.apache.celeborn.common.protocol.message.ControlMessages._
+import org.apache.celeborn.common.protocol.message.{ControlMessages, StatusCode}
 import org.apache.celeborn.common.quota.{QuotaManager, ResourceConsumption}
 import org.apache.celeborn.common.rpc._
-import org.apache.celeborn.common.util.{CelebornHadoopUtils, JavaUtils, PbSerDeUtils, ThreadUtils, Utils}
+import org.apache.celeborn.common.security.{ClientSecurityContextBuilder, SecurityContext, SecurityContextBuilder, ServerSecurityContextBuilder}
+import org.apache.celeborn.common.util.{CelebornHadoopUtils, JavaUtils, PbSerDeUtils, TLSUtils, ThreadUtils, Utils}
 import org.apache.celeborn.server.common.{HttpService, Service}
 import org.apache.celeborn.service.deploy.master.clustermeta.SingleMasterMetaManager
 import org.apache.celeborn.service.deploy.master.clustermeta.ha.{HAHelper, HAMasterMetaManager, MetaHandler}
@@ -59,6 +59,8 @@ private[celeborn] class Master(
 
   override val metricsSystem: MetricsSystem =
     MetricsSystem.createMetricsSystem(serviceName, conf, MetricsSystem.SERVLET_PATH)
+  logInfo(s"Authentication enabled: ${conf.authEnabled}. TLS enabled: ${conf.tlsEnabled}")
+  val (externalSecurityContext, internalSecurityContext) = createSecurityContexts()
 
   override val rpcEnv: RpcEnv = RpcEnv.create(
     RpcNameConstants.MASTER_SYS,
@@ -66,11 +68,23 @@ private[celeborn] class Master(
     masterArgs.host,
     masterArgs.port,
     conf,
-    Math.max(64, Runtime.getRuntime.availableProcessors()))
+    Math.max(64, Runtime.getRuntime.availableProcessors()),
+    externalSecurityContext)
+
+  val internalRpcEnv: RpcEnv = RpcEnv.create(
+    RpcNameConstants.MASTER_INTERNAL_SYS,
+    masterArgs.host,
+    masterArgs.host,
+    masterArgs.internalPort,
+    conf,
+    Math.max(64, Runtime.getRuntime.availableProcessors()),
+    internalSecurityContext)
+
+  val controller = new MasterController(this, internalRpcEnv, conf)
 
   private val statusSystem =
     if (conf.haEnabled) {
-      val sys = new HAMasterMetaManager(rpcEnv, conf)
+      val sys = new HAMasterMetaManager(internalRpcEnv, conf)
       val handler = new MetaHandler(sys)
       try {
         handler.setUpMasterRatisServer(conf, masterArgs.masterClusterInfo.get)
@@ -88,7 +102,7 @@ private[celeborn] class Master(
       }
       sys
     } else {
-      new SingleMasterMetaManager(rpcEnv, conf)
+      new SingleMasterMetaManager(internalRpcEnv, conf)
     }
 
   // Threads
@@ -172,10 +186,11 @@ private[celeborn] class Master(
   metricsSystem.registerSource(new JVMCPUSource(conf, MetricsSystem.ROLE_MASTER))
   metricsSystem.registerSource(new SystemMiscSource(conf, MetricsSystem.ROLE_MASTER))
 
+  internalRpcEnv.setupEndpoint(RpcNameConstants.MASTER_INTERNAL_EP, controller)
   rpcEnv.setupEndpoint(RpcNameConstants.MASTER_EP, this)
 
   // start threads to check timeout for workers and applications
-  override def onStart(): Unit = {
+  private[master] def onStartInternal(): Unit = {
     checkForWorkerTimeOutTask = forwardMessageThread.scheduleAtFixedRate(
       new Runnable {
         override def run(): Unit = Utils.tryLogNonFatalError {
@@ -220,7 +235,7 @@ private[celeborn] class Master(
 
   }
 
-  override def onStop(): Unit = {
+  private[master] def onStopInternal(): Unit = {
     logInfo("Stopping Celeborn Master.")
     if (checkForWorkerTimeOutTask != null) {
       checkForWorkerTimeOutTask.cancel(true)
@@ -243,16 +258,57 @@ private[celeborn] class Master(
     logDebug(s"Client $address got disassociated.")
   }
 
-  def executeWithLeaderChecker[T](context: RpcCallContext, f: => T): Unit =
+  def executeWithLeaderChecker[T](context: RpcCallContext, f: => T): Unit = {
     if (HAHelper.checkShouldProcess(context, statusSystem)) {
       try {
         f
       } catch {
         case e: Exception =>
+          logError("Face unexpected exception during executeWithLeaderChecker", e)
           HAHelper.sendFailure(context, HAHelper.getRatisServer(statusSystem), e)
       }
     }
+  }
 
+  /**
+   * Create security contexts for external and internal RPC endpoints.
+   *
+   * @return
+   */
+  def createSecurityContexts(): (Option[SecurityContext], Option[SecurityContext]) = {
+    if (!conf.authEnabled) {
+      return (Option.empty, Option.empty)
+    }
+    val (serverSslContext, clientSslContext) =
+      if (conf.tlsEnabled) {
+        logInfo("TLS is enabled.")
+        (
+          Some(TLSUtils.buildSslContextForServer(
+            Paths.get(conf.authServerCertPath),
+            Paths.get(conf.authServerKeyPath))),
+          Some(TLSUtils.buildSslContextForClient(false)))
+      } else {
+        (None, None)
+      }
+    val externalSecurityContext = new SecurityContextBuilder()
+      .withClientSecurityContext(
+        new ClientSecurityContextBuilder().withSslContext(clientSslContext).build())
+      .withServerSecurityContext(
+        new ServerSecurityContextBuilder()
+          .withSslContext(serverSslContext)
+          .withSecretKeyHolder(SecretRegistry.getInstance())
+          .withAddRegistrationBootstrap(true).build()).build()
+
+    val internalSecurityContext = new SecurityContextBuilder()
+      .withClientSecurityContext(
+        new ClientSecurityContextBuilder().withSslContext(clientSslContext).build())
+      .withServerSecurityContext(new ServerSecurityContextBuilder().withSslContext(
+        serverSslContext).build()).build()
+
+    (Some(externalSecurityContext), Some(internalSecurityContext))
+  }
+
+  // TODO: Remove the cases which are not relevant any more
   override def receive: PartialFunction[Any, Unit] = {
     case _: PbCheckForWorkerTimeout =>
       executeWithLeaderChecker(null, timeoutDeadWorkers())
@@ -268,11 +324,13 @@ private[celeborn] class Master(
       val pushPort = pb.getPushPort
       val fetchPort = pb.getFetchPort
       val replicatePort = pb.getReplicatePort
+      val internalRpcPort = pb.getInternalRpcPort
       val requestId = pb.getRequestId
-      logDebug(s"Received worker lost $host:$rpcPort:$pushPort:$fetchPort:$replicatePort.")
+      logDebug(
+        s"Received worker lost $host:$rpcPort:$pushPort:$fetchPort:$replicatePort:$internalRpcPort.")
       executeWithLeaderChecker(
         null,
-        handleWorkerLost(null, host, rpcPort, pushPort, fetchPort, replicatePort, requestId))
+        handleWorkerLost(null, host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort, requestId))
     case pb: PbRemoveWorkersUnavailableInfo =>
       val unavailableWorkers = new util.ArrayList[WorkerInfo](pb.getWorkerInfoList
         .asScala.map(PbSerDeUtils.fromPbWorkerInfo).toList.asJava)
@@ -301,34 +359,6 @@ private[celeborn] class Master(
           requestId,
           shouldResponse))
 
-    case pbRegisterWorker: PbRegisterWorker =>
-      val requestId = pbRegisterWorker.getRequestId
-      val host = pbRegisterWorker.getHost
-      val rpcPort = pbRegisterWorker.getRpcPort
-      val pushPort = pbRegisterWorker.getPushPort
-      val fetchPort = pbRegisterWorker.getFetchPort
-      val replicatePort = pbRegisterWorker.getReplicatePort
-      val disks = pbRegisterWorker.getDisksList.asScala
-        .map { pbDiskInfo => pbDiskInfo.getMountPoint -> PbSerDeUtils.fromPbDiskInfo(pbDiskInfo) }
-        .toMap.asJava
-      val userResourceConsumption =
-        PbSerDeUtils.fromPbUserResourceConsumption(pbRegisterWorker.getUserResourceConsumptionMap)
-
-      logDebug(s"Received RegisterWorker request $requestId, $host:$pushPort:$replicatePort" +
-        s" $disks.")
-      executeWithLeaderChecker(
-        context,
-        handleRegisterWorker(
-          context,
-          host,
-          rpcPort,
-          pushPort,
-          fetchPort,
-          replicatePort,
-          disks,
-          userResourceConsumption,
-          requestId))
-
     case ReleaseSlots(_, _, _, _, _) =>
       // keep it for compatible reason
       context.reply(ReleaseSlotsResponse(StatusCode.SUCCESS))
@@ -356,6 +386,7 @@ private[celeborn] class Master(
           pushPort,
           fetchPort,
           replicatePort,
+          internalRpcPort,
           disks,
           userResourceConsumption,
           activeShuffleKey,
@@ -373,6 +404,7 @@ private[celeborn] class Master(
           pushPort,
           fetchPort,
           replicatePort,
+          internalRpcPort,
           disks,
           userResourceConsumption,
           activeShuffleKey,
@@ -391,11 +423,12 @@ private[celeborn] class Master(
       val pushPort = pb.getPushPort
       val fetchPort = pb.getFetchPort
       val replicatePort = pb.getReplicatePort
+      val internalRpcPort = pb.getInternalRpcPort
       val requestId = pb.getRequestId
-      logInfo(s"Received worker lost $host:$rpcPort:$pushPort:$fetchPort:$replicatePort.")
+      logInfo(s"Received worker lost $host:$rpcPort:$pushPort:$fetchPort:$replicatePort:$internalRpcPort.")
       executeWithLeaderChecker(
         context,
-        handleWorkerLost(context, host, rpcPort, pushPort, fetchPort, replicatePort, requestId))
+        handleWorkerLost(context, host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort, requestId))
 
     case CheckQuota(userIdentifier) =>
       executeWithLeaderChecker(context, handleCheckQuota(userIdentifier, context))
@@ -423,6 +456,7 @@ private[celeborn] class Master(
           worker.pushPort,
           worker.fetchPort,
           worker.replicatePort,
+          worker.internalRpcPort,
           MasterClient.genRequestId()))
       }
       ind += 1
@@ -448,7 +482,7 @@ private[celeborn] class Master(
     }
   }
 
-  private def timeoutDeadApplications(): Unit = {
+  private[master] def timeoutDeadApplications(): Unit = {
     val currentTime = System.currentTimeMillis()
     // Need increase timeout deadline to avoid long time leader election period
     if (HAHelper.getAppTimeoutDeadline(statusSystem) > currentTime) {
@@ -471,20 +505,22 @@ private[celeborn] class Master(
     }
   }
 
-  private def handleHeartbeatFromWorker(
+  private[master] def handleHeartbeatFromWorker(
       context: RpcCallContext,
       host: String,
       rpcPort: Int,
       pushPort: Int,
       fetchPort: Int,
       replicatePort: Int,
+      internalRpcPort: Int,
       disks: Seq[DiskInfo],
       userResourceConsumption: util.Map[UserIdentifier, ResourceConsumption],
       activeShuffleKeys: util.Set[String],
       estimatedAppDiskUsage: util.HashMap[String, java.lang.Long],
       highWorkload: Boolean,
       requestId: String): Unit = {
-    val targetWorker = new WorkerInfo(host, rpcPort, pushPort, fetchPort, replicatePort)
+    val targetWorker =
+      new WorkerInfo(host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort)
     val registered = workersSnapShot.asScala.contains(targetWorker)
     if (!registered) {
       logWarning(s"Received heartbeat from unknown worker " +
@@ -496,6 +532,7 @@ private[celeborn] class Master(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks.map { disk => disk.mountPoint -> disk }.toMap.asJava,
         userResourceConsumption,
         estimatedAppDiskUsage,
@@ -515,13 +552,14 @@ private[celeborn] class Master(
     context.reply(HeartbeatFromWorkerResponse(expiredShuffleKeys, registered))
   }
 
-  private def handleWorkerLost(
+  private[master] def handleWorkerLost(
       context: RpcCallContext,
       host: String,
       rpcPort: Int,
       pushPort: Int,
       fetchPort: Int,
       replicatePort: Int,
+      internalRpcPort: Int,
       requestId: String): Unit = {
     val targetWorker = new WorkerInfo(
       host,
@@ -529,6 +567,7 @@ private[celeborn] class Master(
       pushPort,
       fetchPort,
       replicatePort,
+      internalRpcPort,
       new util.HashMap[String, DiskInfo](),
       JavaUtils.newConcurrentHashMap[UserIdentifier, ResourceConsumption]())
     val worker: WorkerInfo = workersSnapShot
@@ -539,7 +578,14 @@ private[celeborn] class Master(
       logWarning(s"Unknown worker $host:$rpcPort:$pushPort:$fetchPort:$replicatePort" +
         s" for WorkerLost handler!")
     } else {
-      statusSystem.handleWorkerLost(host, rpcPort, pushPort, fetchPort, replicatePort, requestId)
+      statusSystem.handleWorkerLost(
+        host,
+        rpcPort,
+        pushPort,
+        fetchPort,
+        replicatePort,
+        internalRpcPort,
+        requestId)
     }
     if (context != null) {
       context.reply(WorkerLostResponse(true))
@@ -553,6 +599,7 @@ private[celeborn] class Master(
       pushPort: Int,
       fetchPort: Int,
       replicatePort: Int,
+      internalRpcPort: Int,
       disks: util.Map[String, DiskInfo],
       userResourceConsumption: util.Map[UserIdentifier, ResourceConsumption],
       requestId: String): Unit = {
@@ -563,13 +610,14 @@ private[celeborn] class Master(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks,
         userResourceConsumption)
     if (workersSnapShot.contains(workerToRegister)) {
       logWarning(s"Receive RegisterWorker while worker" +
         s" ${workerToRegister.toString()} already exists, re-register.")
       // TODO: remove `WorkerRemove` because we have improve register logic to cover `WorkerRemove`
-      statusSystem.handleWorkerRemove(host, rpcPort, pushPort, fetchPort, replicatePort, requestId)
+      statusSystem.handleWorkerRemove(host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort, requestId)
       val newRequestId = MasterClient.genRequestId()
       statusSystem.handleRegisterWorker(
         host,
@@ -577,6 +625,7 @@ private[celeborn] class Master(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks,
         userResourceConsumption,
         newRequestId)
@@ -591,6 +640,7 @@ private[celeborn] class Master(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks,
         userResourceConsumption,
         requestId)
@@ -602,6 +652,7 @@ private[celeborn] class Master(
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks,
         userResourceConsumption,
         requestId)
@@ -684,7 +735,22 @@ private[celeborn] class Master(
       })
       logInfo(s"Offered extra $offerSlotsExtraSize slots for $shuffleKey")
     }
-
+    if (conf.authEnabled) {
+      // Pass application registration information to the workers
+      try {
+        slots.keySet().forEach(worker => {
+          logInfo(s"Sending app registration info to ${worker.host}:${worker.internalRpcPort}")
+          internalRpcEnv.setupEndpointRef(
+            RpcAddress.apply(worker.host, worker.internalRpcPort),
+              WORKER_INTERNAL_EP).send(ApplicationMetaInfo(
+            requestSlots.applicationId,
+            SecretRegistry.getInstance().getSecret(requestSlots.applicationId)))
+        })
+      } catch {
+        case t: Throwable =>
+          logError(s"Send application meta info to workers failed!", t)
+      }
+    }
     context.reply(RequestSlotsResponse(StatusCode.SUCCESS, slots.asInstanceOf[WorkerResource]))
   }
 
@@ -699,7 +765,7 @@ private[celeborn] class Master(
     context.reply(UnregisterShuffleResponse(StatusCode.SUCCESS))
   }
 
-  private def handleReportNodeUnavailable(
+  private[master] def handleReportNodeUnavailable(
       context: RpcCallContext,
       failedWorkers: util.List[WorkerInfo],
       requestId: String): Unit = {
@@ -717,12 +783,13 @@ private[celeborn] class Master(
         if (hasHDFSStorage) {
           checkAndCleanExpiredAppDirsOnHDFS(appId)
         }
+        SecretRegistry.getInstance().unregisterApplication(appId)
         context.reply(ApplicationLostResponse(StatusCode.SUCCESS))
       }
     })
   }
 
-  private def checkAndCleanExpiredAppDirsOnHDFS(expiredDir: String = ""): Unit = {
+  private[master] def checkAndCleanExpiredAppDirsOnHDFS(expiredDir: String = ""): Unit = {
     if (hadoopFs == null) {
       try {
         hadoopFs = CelebornHadoopUtils.getHadoopFS(conf)
@@ -986,12 +1053,14 @@ private[celeborn] class Master(
   override def initialize(): Unit = {
     super.initialize()
     logInfo("Master started.")
+    internalRpcEnv.awaitTermination()
     rpcEnv.awaitTermination()
   }
 
   override def stop(exitKind: Int): Unit = synchronized {
     if (!stopped) {
       logInfo("Stopping Master")
+      internalRpcEnv.stop(self)
       rpcEnv.stop(self)
       super.stop(exitKind)
       logInfo("Master stopped.")

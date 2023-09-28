@@ -53,6 +53,7 @@ public class MasterClient {
 
   private final RpcEnv rpcEnv;
   private final List<String> masterEndpoints;
+  private final boolean isWorker;
   private final int maxRetries;
 
   private final RpcTimeout rpcTimeout;
@@ -60,9 +61,14 @@ public class MasterClient {
   private final AtomicReference<RpcEndpointRef> rpcEndpointRef;
   private final ExecutorService oneWayMessageSender;
 
-  public MasterClient(RpcEnv rpcEnv, CelebornConf conf) {
+  public MasterClient(RpcEnv rpcEnv, CelebornConf conf, boolean isWorker) {
     this.rpcEnv = rpcEnv;
-    this.masterEndpoints = Arrays.asList(conf.masterEndpoints());
+    this.isWorker = isWorker;
+    if (isWorker) {
+      this.masterEndpoints = Arrays.asList(conf.masterInternalEndpoints());
+    } else {
+      this.masterEndpoints = Arrays.asList(conf.masterEndpoints());
+    }
     Collections.shuffle(this.masterEndpoints);
     this.maxRetries = Math.max(masterEndpoints.size(), conf.masterClientMaxRetries());
     this.rpcTimeout = conf.masterClientRpcAskTimeout();
@@ -249,7 +255,9 @@ public class MasterClient {
     RpcEndpointRef endpointRef = null;
     try {
       endpointRef =
-          rpcEnv.setupEndpointRef(RpcAddress.fromHostAndPort(endpoint), RpcNameConstants.MASTER_EP);
+          rpcEnv.setupEndpointRef(
+              RpcAddress.fromHostAndPort(endpoint),
+              isWorker ? RpcNameConstants.MASTER_INTERNAL_EP : RpcNameConstants.MASTER_EP);
     } catch (Exception e) {
       // Catch all exceptions. Because we don't care whether this exception is IOException or
       // TimeoutException or other exceptions, so we just try to connect to host:port, if fail,

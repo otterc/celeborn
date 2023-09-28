@@ -82,6 +82,13 @@ enum MessageType {
   BACKLOG_ANNOUNCEMENT = 59;
   BUFFER_STREAM_END = 60;
   READ_ADD_CREDIT = 61;
+  AUTHENTICATION_INITIATION_REQUEST = 62;
+  AUTHENTICATION_INITIATION_RESPONSE = 63;
+  SASL_MESSAGE = 64;
+  REGISTER_APPLICATION_REQUEST = 65;
+  REGISTER_APPLICATION_RESPONSE = 66;
+  APPLICATION_META_INFO = 67;
+  APPLICATION_META_INFO_REQUEST = 68;
 }
 
 message PbStorageInfo {
@@ -132,6 +139,7 @@ message PbWorkerInfo {
   int32 replicatePort = 5;
   repeated PbDiskInfo disks = 6;
   map<string, PbResourceConsumption> userResourceConsumption = 7;
+  int32 internalRpcPort = 8;
 }
 
 message PbFileGroup {
@@ -147,6 +155,7 @@ message PbRegisterWorker {
   repeated PbDiskInfo disks = 6;
   string requestId = 9;
   map<string, PbResourceConsumption> userResourceConsumption = 8;
+  int32 internalRpcPort = 10;
 }
 
 message PbHeartbeatFromWorker {
@@ -161,6 +170,7 @@ message PbHeartbeatFromWorker {
   map<string, PbResourceConsumption> userResourceConsumption = 9;
   map<string, int64> estimatedAppDiskUsage = 10;
   bool highWorkload = 11;
+  int32 internalRpcPort = 12;
 }
 
 message PbHeartbeatFromWorkerResponse {
@@ -185,6 +195,7 @@ message PbRegisterMapPartitionTask {
 message PbRegisterShuffleResponse {
   int32 status = 1;
   repeated PbPartitionLocation partitionLocations = 2;
+  PbApplicationMetaInfo applicationMetaInfo = 3;
 }
 
 message PbRequestSlots {
@@ -282,6 +293,7 @@ message PbGetReducerFileGroupResponse {
 
   // only map partition mode has succeed partitionIds
   repeated int32 partitionIds = 4;
+  PbApplicationMetaInfo applicationMetaInfo = 5;
 }
 
 message PbUnregisterShuffle {
@@ -413,6 +425,7 @@ message PbWorkerLost {
   int32 fetchPort = 4;
   int32 replicatePort = 5;
   string requestId = 6;
+  int32 internalRpcPort = 7;
 }
 
 message PbWorkerLostResponse {
@@ -544,4 +557,55 @@ message PbBufferStreamEnd {
 message PbReadAddCredit {
   int64 streamId = 1;
   int32 credit = 2;
+}
+
+
+enum PbAuthType {
+  CLIENT_AUTH = 0;
+  CONNECTION_AUTH = 1;
+}
+
+message PbSaslMechanism {
+  string method = 1;
+  repeated PbAuthType authTypes = 2;
+}
+
+message PbAuthenticationInitiationRequest {
+  string appId = 1;
+  string version = 2;
+  bool authEnabled = 3;
+  repeated PbSaslMechanism saslMechanisms = 4;
+}
+
+message PbAuthenticationInitiationResponse {
+  string version = 1;
+  bool authEnabled = 2;
+  repeated PbSaslMechanism saslMechanisms = 3;
+}
+
+message PbSaslMessage {
+  string appId = 1;
+  string method = 2;
+  PbAuthType authType = 3;
+  bytes payload = 4;
+}
+
+message PbRegisterApplicationRequest {
+  string appId = 1;
+  string secret = 2;
+}
+
+message PbRegisterApplicationResponse {
+  bool status = 1;
+  string message = 2;
+}
+
+message PbApplicationMetaInfo {
+  string appId = 1;
+  string secret = 2;
+}
+
+message PbApplicationMetaInfoRequest {
+  string appId = 1;
+  string requestId = 2;
 }

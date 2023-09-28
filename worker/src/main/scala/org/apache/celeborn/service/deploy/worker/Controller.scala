@@ -33,7 +33,8 @@ import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{WorkerInfo, WorkerPartitionLocationInfo}
 import org.apache.celeborn.common.metrics.MetricsSystem
-import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, StorageInfo}
+import org.apache.celeborn.common.network.sasl.SecretRegistry
+import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, PbApplicationMetaInfo, StorageInfo}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc._
@@ -77,6 +78,16 @@ private[deploy] class Controller(
     commitThreadPool = worker.commitThreadPool
     asyncReplyPool = worker.asyncReplyPool
     shutdown = worker.shutdown
+  }
+
+  /**
+   * Process messages from `RpcEndpointRef.send` or `RpcCallContext.reply`. If receiving a
+   * unmatched message, `SparkException` will be thrown and sent to `onError`.
+   */
+  override def receive: PartialFunction[Any, Unit] = {
+    case pb: PbApplicationMetaInfo =>
+      logWarning(s"Received application meta info for ${pb.getAppId}")
+      SecretRegistry.getInstance().registerApplication(pb.getAppId, pb.getSecret)
   }
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {

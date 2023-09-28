@@ -71,14 +71,26 @@ public class SingleMasterMetaManager extends AbstractMetaManager {
 
   @Override
   public void handleWorkerLost(
-      String host, int rpcPort, int pushPort, int fetchPort, int replicatePort, String requestId) {
-    updateWorkerLostMeta(host, rpcPort, pushPort, fetchPort, replicatePort);
+      String host,
+      int rpcPort,
+      int pushPort,
+      int fetchPort,
+      int replicatePort,
+      int internalRpcPort,
+      String requestId) {
+    updateWorkerLostMeta(host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort);
   }
 
   @Override
   public void handleWorkerRemove(
-      String host, int rpcPort, int pushPort, int fetchPort, int replicatePort, String requestId) {
-    updateWorkerRemoveMeta(host, rpcPort, pushPort, fetchPort, replicatePort);
+      String host,
+      int rpcPort,
+      int pushPort,
+      int fetchPort,
+      int replicatePort,
+      int internalRpcPort,
+      String requestId) {
+    updateWorkerRemoveMeta(host, rpcPort, pushPort, fetchPort, replicatePort, internalRpcPort);
   }
 
   @Override
@@ -94,6 +106,7 @@ public class SingleMasterMetaManager extends AbstractMetaManager {
       int pushPort,
       int fetchPort,
       int replicatePort,
+      int internalRpcPort,
       Map<String, DiskInfo> disks,
       Map<UserIdentifier, ResourceConsumption> userResourceConsumption,
       Map<String, Long> estimatedAppDiskUsage,
@@ -106,6 +119,7 @@ public class SingleMasterMetaManager extends AbstractMetaManager {
         pushPort,
         fetchPort,
         replicatePort,
+        internalRpcPort,
         disks,
         userResourceConsumption,
         estimatedAppDiskUsage,
@@ -120,11 +134,19 @@ public class SingleMasterMetaManager extends AbstractMetaManager {
       int pushPort,
       int fetchPort,
       int replicatePort,
+      int internalRpcPort,
       Map<String, DiskInfo> disks,
       Map<UserIdentifier, ResourceConsumption> userResourceConsumption,
       String requestId) {
     updateRegisterWorkerMeta(
-        host, rpcPort, pushPort, fetchPort, replicatePort, disks, userResourceConsumption);
+        host,
+        rpcPort,
+        pushPort,
+        fetchPort,
+        replicatePort,
+        internalRpcPort,
+        disks,
+        userResourceConsumption);
   }
 
   @Override

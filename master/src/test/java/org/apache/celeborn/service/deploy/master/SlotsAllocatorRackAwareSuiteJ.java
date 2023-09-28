@@ -121,12 +121,12 @@ public class SlotsAllocatorRackAwareSuiteJ {
 
   private List<WorkerInfo> prepareWorkers(CelebornRackResolver resolver) {
     ArrayList<WorkerInfo> workers = new ArrayList<>(3);
-    workers.add(new WorkerInfo("host1", 9, 10, 110, 113, new HashMap<>(), null));
-    workers.add(new WorkerInfo("host2", 9, 11, 111, 114, new HashMap<>(), null));
-    workers.add(new WorkerInfo("host3", 9, 12, 112, 115, new HashMap<>(), null));
-    workers.add(new WorkerInfo("host4", 9, 10, 110, 113, new HashMap<>(), null));
-    workers.add(new WorkerInfo("host5", 9, 11, 111, 114, new HashMap<>(), null));
-    workers.add(new WorkerInfo("host6", 9, 12, 112, 115, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host1", 9, 10, 110, 113, 116, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host2", 9, 11, 111, 114, 117, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host3", 9, 12, 112, 115, 118, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host4", 9, 10, 110, 113, 119, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host5", 9, 11, 111, 114, 120, new HashMap<>(), null));
+    workers.add(new WorkerInfo("host6", 9, 12, 112, 115, 121, new HashMap<>(), null));
 
     workers.forEach(
         new Consumer<WorkerInfo>() {

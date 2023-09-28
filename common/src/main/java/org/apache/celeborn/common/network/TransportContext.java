@@ -17,21 +17,33 @@
 
 package org.apache.celeborn.common.network;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.handler.codec.MessageToMessageEncoder;
+import io.netty.handler.ssl.SslContext;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.metrics.source.AbstractSource;
 import org.apache.celeborn.common.network.client.TransportClient;
+import org.apache.celeborn.common.network.client.TransportClientBootstrap;
 import org.apache.celeborn.common.network.client.TransportClientFactory;
 import org.apache.celeborn.common.network.client.TransportResponseHandler;
 import org.apache.celeborn.common.network.protocol.MessageEncoder;
+import org.apache.celeborn.common.network.protocol.MessageWithHeader;
 import org.apache.celeborn.common.network.server.*;
+import org.apache.celeborn.common.network.util.ByteArrayWritableChannel;
 import org.apache.celeborn.common.network.util.FrameDecoder;
+import org.apache.celeborn.common.network.util.NettyLogger;
 import org.apache.celeborn.common.network.util.TransportConf;
 import org.apache.celeborn.common.network.util.TransportFrameDecoder;
 
@@ -58,7 +70,11 @@ public class TransportContext {
   private final boolean enableHeartbeat;
   private final AbstractSource source;
 
+  private final TransportSslContext transportSslContext;
+
   private static final MessageEncoder ENCODER = MessageEncoder.INSTANCE;
+
+  private static final NettyLogger NETTY_LOGGER = new NettyLogger();
 
   public TransportContext(
       TransportConf conf,
@@ -66,13 +82,15 @@ public class TransportContext {
       boolean closeIdleConnections,
       ChannelDuplexHandler channelsLimiter,
       boolean enableHeartbeat,
-      AbstractSource source) {
+      AbstractSource source,
+      TransportSslContext transportSslContext) {
     this.conf = conf;
     this.msgHandler = msgHandler;
     this.closeIdleConnections = closeIdleConnections;
     this.channelsLimiter = channelsLimiter;
     this.enableHeartbeat = enableHeartbeat;
     this.source = source;
+    this.transportSslContext = transportSslContext;
   }
 
   public TransportContext(
@@ -80,48 +98,106 @@ public class TransportContext {
       BaseMessageHandler msgHandler,
       boolean closeIdleConnections,
       boolean enableHeartbeat,
-      AbstractSource source) {
-    this(conf, msgHandler, closeIdleConnections, null, enableHeartbeat, source);
+      AbstractSource source,
+      TransportSslContext transportSslContext) {
+    this(
+        conf, msgHandler, closeIdleConnections, null, enableHeartbeat, source, transportSslContext);
   }
 
   public TransportContext(
       TransportConf conf, BaseMessageHandler msgHandler, boolean closeIdleConnections) {
-    this(conf, msgHandler, closeIdleConnections, null, false, null);
+    this(conf, msgHandler, closeIdleConnections, null, false, null, null);
   }
 
   public TransportContext(TransportConf conf, BaseMessageHandler msgHandler) {
-    this(conf, msgHandler, false, false, null);
+    this(conf, msgHandler, null);
+  }
+
+  public TransportContext(
+      TransportConf conf, BaseMessageHandler msgHandler, TransportSslContext transportSslContext) {
+    this(conf, msgHandler, false, false, null, transportSslContext);
+  }
+
+  /**
+   * Initializes a ClientFactory which runs the given TransportClientBootstraps prior to returning a
+   * new Client. Bootstraps will be executed synchronously, and must run successfully in order to
+   * create a Client.
+   */
+  public TransportClientFactory createClientFactory(List<TransportClientBootstrap> bootstraps) {
+    return new TransportClientFactory(this, bootstraps);
   }
 
   public TransportClientFactory createClientFactory() {
-    return new TransportClientFactory(this);
+    return createClientFactory(new ArrayList<>());
   }
 
   /** Create a server which will attempt to bind to a specific host and port. */
-  public TransportServer createServer(String host, int port) {
-    return new TransportServer(this, host, port, source);
+  public TransportServer createServer(
+      String host, int port, List<TransportServerBootstrap> bootstraps) {
+    return new TransportServer(this, host, port, source, msgHandler, bootstraps);
   }
 
-  public TransportServer createServer(int port) {
-    return createServer(null, port);
+  public TransportServer createServer(int port, List<TransportServerBootstrap> bootstraps) {
+    return createServer(null, port, bootstraps);
   }
 
   /** For Suite only */
   public TransportServer createServer() {
-    return createServer(null, 0);
-  }
-
-  public TransportChannelHandler initializePipeline(SocketChannel channel) {
-    return initializePipeline(channel, new TransportFrameDecoder());
+    return createServer(null, 0, new ArrayList<>());
   }
 
   public TransportChannelHandler initializePipeline(
-      SocketChannel channel, ChannelInboundHandlerAdapter decoder) {
+      SocketChannel channel, ChannelInboundHandlerAdapter decoder, SslContext sslContext) {
+    return initializePipeline(channel, decoder, sslContext, msgHandler);
+  }
+
+  public TransportChannelHandler initializePipeline(
+      SocketChannel channel, SslContext sslContext, BaseMessageHandler resolvedMsgHandler) {
+    return initializePipeline(channel, new TransportFrameDecoder(), sslContext, resolvedMsgHandler);
+  }
+
+  public TransportChannelHandler initializePipeline(
+      SocketChannel channel,
+      ChannelInboundHandlerAdapter decoder,
+      SslContext sslContext,
+      BaseMessageHandler resolvedMsgHandler) {
     try {
+      if (sslContext != null) {
+        channel.pipeline().addLast("sslHandler", sslContext.newHandler(channel.alloc()));
+      }
+      if (NETTY_LOGGER.getLoggingHandler() != null) {
+        channel.pipeline().addLast("loggingHandler", NETTY_LOGGER.getLoggingHandler());
+      }
       if (channelsLimiter != null) {
         channel.pipeline().addLast("limiter", channelsLimiter);
       }
-      TransportChannelHandler channelHandler = createChannelHandler(channel, msgHandler);
+      if (sslContext != null) {
+        // TODO: SslHandler accepts ByteBuf not MessageWithHeader. For shuffle data, we can't use
+        // that.
+        channel
+            .pipeline()
+            .addLast(
+                "convertToByteBuf",
+                new MessageToMessageEncoder<MessageWithHeader>() {
+                  @Override
+                  protected void encode(
+                      ChannelHandlerContext channelHandlerContext,
+                      MessageWithHeader messageWithHeader,
+                      List<Object> out)
+                      throws Exception {
+                    MessageWithHeader msgWithHeader =
+                        (MessageWithHeader) out.remove(out.size() - 1);
+                    ByteArrayWritableChannel writableChannel =
+                        new ByteArrayWritableChannel((int) msgWithHeader.count());
+                    while (msgWithHeader.transfered() < msgWithHeader.count()) {
+                      msgWithHeader.transferTo(writableChannel, msgWithHeader.transfered());
+                    }
+                    ByteBuf messageBuf = Unpooled.wrappedBuffer(writableChannel.getData());
+                    out.add(messageBuf);
+                  }
+                });
+      }
+      TransportChannelHandler channelHandler = createChannelHandler(channel, resolvedMsgHandler);
       channel
           .pipeline()
           .addLast("encoder", ENCODER)
@@ -161,5 +237,31 @@ public class TransportContext {
 
   public BaseMessageHandler getMsgHandler() {
     return msgHandler;
+  }
+
+  public SslContext getServerSslContext() {
+    return transportSslContext != null ? transportSslContext.serverSslContext : null;
+  }
+
+  public SslContext getClientSslContext() {
+    return transportSslContext != null ? transportSslContext.clientSslContext : null;
+  }
+
+  public static class TransportSslContext {
+    private final SslContext serverSslContext;
+    private final SslContext clientSslContext;
+
+    public TransportSslContext(SslContext serverSslContext, SslContext clientSslContext) {
+      this.serverSslContext = serverSslContext;
+      this.clientSslContext = clientSslContext;
+    }
+
+    public SslContext getServerSslContext() {
+      return serverSslContext;
+    }
+
+    public SslContext getClientSslContext() {
+      return clientSslContext;
+    }
   }
 }
