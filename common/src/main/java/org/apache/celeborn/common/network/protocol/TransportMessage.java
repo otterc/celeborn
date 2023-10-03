@@ -17,9 +17,9 @@
 
 package org.apache.celeborn.common.network.protocol;
 
+import static org.apache.celeborn.common.protocol.MessageType.*;
 import static org.apache.celeborn.common.protocol.MessageType.BACKLOG_ANNOUNCEMENT_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.BUFFER_STREAM_END_VALUE;
-import static org.apache.celeborn.common.protocol.MessageType.*;
 import static org.apache.celeborn.common.protocol.MessageType.OPEN_STREAM_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.PUSH_DATA_HAND_SHAKE_VALUE;
 import static org.apache.celeborn.common.protocol.MessageType.READ_ADD_CREDIT_VALUE;
@@ -37,20 +37,20 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.celeborn.common.exception.CelebornIOException;
 import org.apache.celeborn.common.protocol.MessageType;
-import org.apache.celeborn.common.protocol.PbBacklogAnnouncement;
-import org.apache.celeborn.common.protocol.PbBufferStreamEnd;
 import org.apache.celeborn.common.protocol.PbApplicationMetaInfo;
 import org.apache.celeborn.common.protocol.PbApplicationMetaInfoRequest;
 import org.apache.celeborn.common.protocol.PbAuthenticationInitiationRequest;
 import org.apache.celeborn.common.protocol.PbAuthenticationInitiationResponse;
+import org.apache.celeborn.common.protocol.PbBacklogAnnouncement;
+import org.apache.celeborn.common.protocol.PbBufferStreamEnd;
 import org.apache.celeborn.common.protocol.PbOpenStream;
-import org.apache.celeborn.common.protocol.PbRegisterApplicationRequest;
-import org.apache.celeborn.common.protocol.PbRegisterApplicationResponse;
-import org.apache.celeborn.common.protocol.PbSaslMessage;
 import org.apache.celeborn.common.protocol.PbPushDataHandShake;
 import org.apache.celeborn.common.protocol.PbReadAddCredit;
 import org.apache.celeborn.common.protocol.PbRegionFinish;
 import org.apache.celeborn.common.protocol.PbRegionStart;
+import org.apache.celeborn.common.protocol.PbRegisterApplicationRequest;
+import org.apache.celeborn.common.protocol.PbRegisterApplicationResponse;
+import org.apache.celeborn.common.protocol.PbSaslMessage;
 import org.apache.celeborn.common.protocol.PbStreamHandler;
 
 public class TransportMessage implements Serializable {

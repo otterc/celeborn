@@ -17,7 +17,6 @@
 
 package org.apache.celeborn.common.network.buffer;
 
-import io.netty.handler.stream.ChunkedStream;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -26,6 +25,7 @@ import java.nio.file.StandardOpenOption;
 import com.google.common.base.Objects;
 import com.google.common.io.ByteStreams;
 import io.netty.channel.DefaultFileRegion;
+import io.netty.handler.stream.ChunkedStream;
 
 import org.apache.celeborn.common.network.util.LimitedInputStream;
 import org.apache.celeborn.common.network.util.TransportConf;

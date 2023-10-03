@@ -17,22 +17,17 @@
 
 package org.apache.celeborn.common.network;
 
-import io.netty.handler.stream.ChunkedWriteHandler;
 import java.util.ArrayList;
 import java.util.List;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.MessageToMessageEncoder;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.stream.ChunkedWriteHandler;
 import io.netty.handler.timeout.IdleStateHandler;
-import org.apache.celeborn.common.network.protocol.Message;
-import org.apache.celeborn.common.network.protocol.SslMessageEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,10 +36,10 @@ import org.apache.celeborn.common.network.client.TransportClient;
 import org.apache.celeborn.common.network.client.TransportClientBootstrap;
 import org.apache.celeborn.common.network.client.TransportClientFactory;
 import org.apache.celeborn.common.network.client.TransportResponseHandler;
+import org.apache.celeborn.common.network.protocol.Message;
 import org.apache.celeborn.common.network.protocol.MessageEncoder;
-import org.apache.celeborn.common.network.protocol.MessageWithHeader;
+import org.apache.celeborn.common.network.protocol.SslMessageEncoder;
 import org.apache.celeborn.common.network.server.*;
-import org.apache.celeborn.common.network.util.ByteArrayWritableChannel;
 import org.apache.celeborn.common.network.util.FrameDecoder;
 import org.apache.celeborn.common.network.util.NettyLogger;
 import org.apache.celeborn.common.network.util.TransportConf;

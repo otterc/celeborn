@@ -1067,7 +1067,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   def authEnabled: Boolean = get(AUTH_ENABLED)
   def tlsEnabled: Boolean = get(AUTH_TLS_ENABLED)
-  def authTlsMaxEncryptedBlockSize: Int = getSizeAsBytes(AUTH_TLS_MAX_ENCRYPTED_BLOCK_SIZE.key, "64k").toInt
+  def authTlsMaxEncryptedBlockSize: Int =
+    getSizeAsBytes(AUTH_TLS_MAX_ENCRYPTED_BLOCK_SIZE.key, "64k").toInt
   def authServerKeyPath: String = get(AUTH_SERVER_KEYPATH.key)
   def authServerCertPath: String = get(AUTH_SERVER_CERTPATH.key)
 }

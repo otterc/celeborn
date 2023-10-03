@@ -828,6 +828,7 @@ public class RatisMasterStatusSystemSuiteJ {
         PUSHPORT1,
         FETCHPORT1,
         REPLICATEPORT1,
+        INTERNALRPCPORT1,
         disks1,
         userResourceConsumption1,
         new HashMap<>(),
@@ -964,6 +965,7 @@ public class RatisMasterStatusSystemSuiteJ {
         PUSHPORT1,
         FETCHPORT1,
         REPLICATEPORT1,
+        INTERNALRPCPORT1,
         disks1,
         userResourceConsumption1,
         getNewReqeustId());
@@ -973,6 +975,7 @@ public class RatisMasterStatusSystemSuiteJ {
         PUSHPORT2,
         FETCHPORT2,
         REPLICATEPORT2,
+        INTERNALRPCPORT2,
         disks2,
         userResourceConsumption2,
         getNewReqeustId());
@@ -982,6 +985,7 @@ public class RatisMasterStatusSystemSuiteJ {
         PUSHPORT3,
         FETCHPORT3,
         REPLICATEPORT3,
+        INTERNALRPCPORT3,
         disks3,
         userResourceConsumption3,
         getNewReqeustId());
@@ -993,6 +997,7 @@ public class RatisMasterStatusSystemSuiteJ {
             PUSHPORT1,
             FETCHPORT1,
             REPLICATEPORT1,
+            INTERNALRPCPORT1,
             disks1,
             userResourceConsumption1);
 
@@ -1000,7 +1005,13 @@ public class RatisMasterStatusSystemSuiteJ {
     unavailableWorkers.add(workerInfo1);
 
     statusSystem.handleWorkerLost(
-        HOSTNAME1, RPCPORT1, PUSHPORT1, FETCHPORT1, REPLICATEPORT1, getNewReqeustId());
+        HOSTNAME1,
+        RPCPORT1,
+        PUSHPORT1,
+        FETCHPORT1,
+        REPLICATEPORT1,
+        INTERNALRPCPORT1,
+        getNewReqeustId());
     statusSystem.handleReportWorkerUnavailable(unavailableWorkers, getNewReqeustId());
 
     Thread.sleep(3000L);

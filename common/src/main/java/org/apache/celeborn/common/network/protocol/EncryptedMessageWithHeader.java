@@ -1,4 +1,3 @@
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -17,23 +16,23 @@
  */
 package org.apache.celeborn.common.network.protocol;
 
+import java.io.InputStream;
+
+import javax.annotation.Nullable;
+
+import com.google.common.base.Preconditions;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.stream.ChunkedStream;
 import io.netty.handler.stream.ChunkedInput;
+import io.netty.handler.stream.ChunkedStream;
 
-import com.google.common.base.Preconditions;
-
-import javax.annotation.Nullable;
-import java.io.InputStream;
 import org.apache.celeborn.common.network.buffer.ManagedBuffer;
-
 
 /**
  * A wrapper message that holds two separate pieces (a header and a body).
  *
- * The header must be a ByteBuf, while the body can be any InputStream
+ * <p>The header must be a ByteBuf, while the body can be any InputStream
  */
 public class EncryptedMessageWithHeader implements ChunkedInput<ByteBuf> {
 
@@ -48,20 +47,19 @@ public class EncryptedMessageWithHeader implements ChunkedInput<ByteBuf> {
    * Construct a new EncryptedMessageWithHeader.
    *
    * @param managedBuffer the {@link ManagedBuffer} that the message body came from. This needs to
-   *                      be passed in so that the buffer can be freed when this message is
-   *                      deallocated. Ownership of the caller's reference to this buffer is
-   *                      transferred to this class, so if the caller wants to continue to use the
-   *                      ManagedBuffer in other messages then they will need to call retain() on
-   *                      it before passing it to this constructor.
+   *     be passed in so that the buffer can be freed when this message is deallocated. Ownership of
+   *     the caller's reference to this buffer is transferred to this class, so if the caller wants
+   *     to continue to use the ManagedBuffer in other messages then they will need to call retain()
+   *     on it before passing it to this constructor.
    * @param header the message header.
    * @param body the message body.
    * @param bodyLength the length of the message body, in bytes.
    */
-
   public EncryptedMessageWithHeader(
       @Nullable ManagedBuffer managedBuffer, ByteBuf header, Object body, long bodyLength) {
-    Preconditions.checkArgument(body instanceof InputStream || body instanceof ChunkedStream,
-      "Body must be an InputStream or a ChunkedStream.");
+    Preconditions.checkArgument(
+        body instanceof InputStream || body instanceof ChunkedStream,
+        "Body must be an InputStream or a ChunkedStream.");
     this.managedBuffer = managedBuffer;
     this.header = header;
     this.headerLength = header.readableBytes();
@@ -112,6 +110,7 @@ public class EncryptedMessageWithHeader implements ChunkedInput<ByteBuf> {
   public long progress() {
     return totalBytesTransferred;
   }
+
   @Override
   public boolean isEndOfInput() throws Exception {
     return (headerLength + bodyLength) == totalBytesTransferred;

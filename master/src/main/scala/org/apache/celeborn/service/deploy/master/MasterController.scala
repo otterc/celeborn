@@ -17,12 +17,20 @@
 
 package org.apache.celeborn.service.deploy.master
 
+import java.util
+
+import scala.collection.JavaConverters._
+import scala.util.Random
+
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.exception.CelebornException
 import org.apache.celeborn.common.internal.Logging
+import org.apache.celeborn.common.meta.WorkerInfo
 import org.apache.celeborn.common.network.sasl.SecretRegistry
+import org.apache.celeborn.common.protocol.{PbCheckForWorkerTimeout, PbRegisterWorker, PbRemoveWorkersUnavailableInfo, PbWorkerLost}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.rpc._
+import org.apache.celeborn.common.util.PbSerDeUtils
 
 private[celeborn] class MasterController(
     val master: Master,
@@ -45,15 +53,64 @@ private[celeborn] class MasterController(
   }
 
   override def receive: PartialFunction[Any, Unit] = {
-    master.receive
+    case _: PbCheckForWorkerTimeout =>
+      master.executeWithLeaderChecker(null, master.timeoutDeadWorkers())
+    case CheckForWorkerUnavailableInfoTimeout =>
+      master.executeWithLeaderChecker(null, master.timeoutWorkerUnavailableInfos())
+    case CheckForApplicationTimeOut =>
+      master.executeWithLeaderChecker(null, master.timeoutDeadApplications())
+    case CheckForHDFSExpiredDirsTimeout =>
+      master.executeWithLeaderChecker(null, master.checkAndCleanExpiredAppDirsOnHDFS())
+    case pb: PbWorkerLost =>
+      master.internalWorkerLost(null, pb)
+    case pb: PbRemoveWorkersUnavailableInfo =>
+      val unavailableWorkers = new util.ArrayList[WorkerInfo](pb.getWorkerInfoList
+        .asScala.map(PbSerDeUtils.fromPbWorkerInfo).toList.asJava)
+      master.executeWithLeaderChecker(
+        null,
+        master.handleRemoveWorkersUnavailableInfos(unavailableWorkers, pb.getRequestId))
   }
-
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
     case ApplicationMetaInfoRequest(appId, requestId) =>
-      logInfo(s"Received request for meta info $requestId $appId.")
+      logDebug(s"Received request for meta info $requestId $appId.")
       master.executeWithLeaderChecker(
         context,
         handleRequestForApplicationMeta(context, appId))
+    case HeartbeatFromWorker(
+          host,
+          rpcPort,
+          pushPort,
+          fetchPort,
+          replicatePort,
+          internalRpcPort,
+          disks,
+          userResourceConsumption,
+          activeShuffleKey,
+          estimatedAppDiskUsage,
+          highWorkload,
+          requestId) =>
+      master.internalHeartbeatFromWorker(
+        context,
+        host,
+        rpcPort,
+        pushPort,
+        fetchPort,
+        replicatePort,
+        internalRpcPort,
+        disks,
+        userResourceConsumption,
+        activeShuffleKey,
+        estimatedAppDiskUsage,
+        highWorkload,
+        requestId)
+    case pbRegisterWorker: PbRegisterWorker =>
+      logDebug(s"Received register worker from  ${pbRegisterWorker.getHost}")
+      master.internalWorkerRegister(context, pbRegisterWorker)
+    case ReportWorkerUnavailable(failedWorkers: util.List[WorkerInfo], requestId: String) =>
+      master.internalWorkerUnavailable(context, failedWorkers, requestId)
+    case pb: PbWorkerLost =>
+      logDebug(s"Received worker lost from  ${pb.getHost}")
+      master.internalWorkerLost(context, pb)
     case _ =>
       master.receiveAndReply(context)
   }

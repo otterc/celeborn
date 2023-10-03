@@ -587,6 +587,7 @@ public class DefaultMetaSystemSuiteJ {
         PUSHPORT3,
         FETCHPORT3,
         REPLICATEPORT3,
+        INTERNALRPCPORT3,
         disks3,
         userResourceConsumption3,
         new HashMap<>(),
