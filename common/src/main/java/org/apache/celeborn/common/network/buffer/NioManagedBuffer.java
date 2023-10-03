@@ -64,6 +64,11 @@ public class NioManagedBuffer extends ManagedBuffer {
   }
 
   @Override
+  public Object convertToNettyForSsl() throws IOException {
+    return Unpooled.wrappedBuffer(buf);
+  }
+
+  @Override
   public String toString() {
     return Objects.toStringHelper(this).add("buf", buf).toString();
   }

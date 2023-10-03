@@ -17,7 +17,10 @@
 
 package org.apache.celeborn.common.network.util;
 
+import com.google.common.primitives.Ints;
 import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.util.JavaUtils;
+
 
 /** A central location that tracks all the settings we expose to users. */
 public class TransportConf {
@@ -158,4 +161,13 @@ public class TransportConf {
   public int saslTimeoutMs() {
     return celebornConf.networkIoSaslTimoutMs(module);
   }
+
+  /**
+   * When Secure (SSL/TLS) Shuffle is enabled, the Chunk size to use for shuffling files.
+   * // TODO: See if we should reuse spark.buffer.write.chunkSize here
+   */
+  public int sslShuffleChunkSize() {
+    return celebornConf.authTlsMaxEncryptedBlockSize();
+  }
+
 }

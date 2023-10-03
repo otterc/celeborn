@@ -79,4 +79,9 @@ public class NettyManagedBuffer extends ManagedBuffer {
   public String toString() {
     return Objects.toStringHelper(this).add("buf", buf).toString();
   }
+
+  @Override
+  public Object convertToNettyForSsl() throws IOException {
+    return buf.duplicate().retain();
+  }
 }

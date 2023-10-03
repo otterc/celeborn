@@ -1067,6 +1067,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   def authEnabled: Boolean = get(AUTH_ENABLED)
   def tlsEnabled: Boolean = get(AUTH_TLS_ENABLED)
+  def authTlsMaxEncryptedBlockSize: Int = getSizeAsBytes(AUTH_TLS_MAX_ENCRYPTED_BLOCK_SIZE.key, "64k").toInt
   def authServerKeyPath: String = get(AUTH_SERVER_KEYPATH.key)
   def authServerCertPath: String = get(AUTH_SERVER_CERTPATH.key)
 }
@@ -3982,14 +3983,6 @@ object CelebornConf extends Logging {
       .booleanConf
       .createWithDefault(false)
 
-  val AUTH_TLS_ENABLED: ConfigEntry[Boolean] =
-    buildConf("celeborn.auth.tls.enabled")
-      .categories("auth")
-      .version("0.4.0")
-      .doc("Whether to enable TLS.")
-      .booleanConf
-      .createWithDefault(false)
-
   val AUTH_SERVER_KEYPATH: OptionalConfigEntry[String] =
     buildConf("celeborn.server.auth.keypath")
       .categories("auth", "master", "worker")
@@ -4004,5 +3997,21 @@ object CelebornConf extends Logging {
       .doc("Path to the master/worker certificate file.")
       .version("0.4.0")
       .stringConf
+      .createOptional
+
+  val AUTH_TLS_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.auth.tls.enabled")
+      .categories("auth")
+      .version("0.4.0")
+      .doc("Whether to enable TLS.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val AUTH_TLS_MAX_ENCRYPTED_BLOCK_SIZE: OptionalConfigEntry[Long] =
+    buildConf("celeborn.auth.tls.maxEncryptedBlockSize")
+      .categories("auth")
+      .version("0.4.0")
+      .doc("Max encrypted block size for TLS.")
+      .bytesConf(ByteUnit.BYTE)
       .createOptional
 }

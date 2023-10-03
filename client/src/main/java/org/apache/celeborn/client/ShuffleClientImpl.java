@@ -213,8 +213,6 @@ public class ShuffleClientImpl extends ShuffleClient {
       dataClientFactory = context.createClientFactory();
     } else {
       Preconditions.checkNotNull(appMetaInfo.get(), "Application meta info is missing");
-      SslContext clientSslContext =
-          conf.tlsEnabled() ? TLSUtils.buildSslContextForClient(true) : null;
       TransportContext context =
           new TransportContext(
               dataTransportConf,
@@ -223,7 +221,7 @@ public class ShuffleClientImpl extends ShuffleClient {
               null,
               false,
               null,
-              new TransportContext.TransportSslContext(null, clientSslContext));
+              null);
       List<TransportClientBootstrap> bootstraps = Lists.newArrayList();
       bootstraps.add(
           new SaslClientBootstrap(

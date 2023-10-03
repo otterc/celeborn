@@ -17,6 +17,7 @@
 
 package org.apache.celeborn.common.network;
 
+import io.netty.handler.stream.ChunkedWriteHandler;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +31,8 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.MessageToMessageEncoder;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.timeout.IdleStateHandler;
+import org.apache.celeborn.common.network.protocol.Message;
+import org.apache.celeborn.common.network.protocol.SslMessageEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,6 +76,7 @@ public class TransportContext {
   private final TransportSslContext transportSslContext;
 
   private static final MessageEncoder ENCODER = MessageEncoder.INSTANCE;
+  private static final MessageToMessageEncoder<Message> SSL_ENCODER = SslMessageEncoder.INSTANCE;
 
   private static final NettyLogger NETTY_LOGGER = new NettyLogger();
 
@@ -172,35 +176,14 @@ public class TransportContext {
         channel.pipeline().addLast("limiter", channelsLimiter);
       }
       if (sslContext != null) {
-        // TODO: SslHandler accepts ByteBuf not MessageWithHeader. For shuffle data, we can't use
-        // that.
-        channel
-            .pipeline()
-            .addLast(
-                "convertToByteBuf",
-                new MessageToMessageEncoder<MessageWithHeader>() {
-                  @Override
-                  protected void encode(
-                      ChannelHandlerContext channelHandlerContext,
-                      MessageWithHeader messageWithHeader,
-                      List<Object> out)
-                      throws Exception {
-                    MessageWithHeader msgWithHeader =
-                        (MessageWithHeader) out.remove(out.size() - 1);
-                    ByteArrayWritableChannel writableChannel =
-                        new ByteArrayWritableChannel((int) msgWithHeader.count());
-                    while (msgWithHeader.transfered() < msgWithHeader.count()) {
-                      msgWithHeader.transferTo(writableChannel, msgWithHeader.transfered());
-                    }
-                    ByteBuf messageBuf = Unpooled.wrappedBuffer(writableChannel.getData());
-                    out.add(messageBuf);
-                  }
-                });
+        // Cannot use zero-copy with HTTPS, so we add in our ChunkedWriteHandler just before the
+        // MessageEncoder
+        channel.pipeline().addLast("chunkedWriter", new ChunkedWriteHandler());
       }
       TransportChannelHandler channelHandler = createChannelHandler(channel, resolvedMsgHandler);
       channel
           .pipeline()
-          .addLast("encoder", ENCODER)
+          .addLast("encoder", sslContext != null ? SSL_ENCODER : ENCODER)
           .addLast(FrameDecoder.HANDLER_NAME, decoder)
           .addLast(
               "idleStateHandler",

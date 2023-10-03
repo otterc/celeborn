@@ -17,6 +17,7 @@
 
 package org.apache.celeborn.common.network.buffer;
 
+import io.netty.handler.stream.ChunkedStream;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -129,6 +130,12 @@ public final class FileSegmentManagedBuffer extends ManagedBuffer {
       FileChannel fileChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
       return new DefaultFileRegion(fileChannel, offset, length);
     }
+  }
+
+  @Override
+  public Object convertToNettyForSsl() throws IOException {
+    // Cannot use zero-copy with HTTPS
+    return new ChunkedStream(createInputStream(), conf.sslShuffleChunkSize());
   }
 
   public File getFile() {
